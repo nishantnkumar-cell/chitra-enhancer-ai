@@ -313,10 +313,14 @@ fn batch(a: Args) -> Result<()> {
     Ok(())
 }
 
-fn run_one(a: Args) -> Result<()> {
+fn run_one(mut a: Args) -> Result<()> {
     if !a.input.is_file() {
         bail!("{} is not a file", a.input.display());
     }
+    // Absolute paths can never be mistaken for an ffmpeg option (a name that
+    // starts with "-"), and make "output is the input" comparisons reliable.
+    a.input = std::path::absolute(&a.input)?;
+    a.output = std::path::absolute(&a.output)?;
     if a.output.exists() && !a.restart && a.output == a.input {
         bail!("the output must not be the input");
     }
@@ -457,6 +461,12 @@ fn run_one(a: Args) -> Result<()> {
             p.compare.display()
         );
         return Ok(());
+    }
+    if o.output.exists() && !a.force {
+        bail!(
+            "{} already exists; use --force to replace it, or choose another name",
+            o.output.display()
+        );
     }
     let s = video::run(&o, engine.as_mut(), temporal.as_deref_mut(), &info)?;
     eprintln!(

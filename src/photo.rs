@@ -14,6 +14,9 @@ use crate::tiler::Plane;
 
 /// Decoded pixels may not exceed this (a hostile file cannot ask for more).
 const MAX_PIXELS: u64 = 250_000_000;
+/// Largest enlarged picture: the float picture, the tile accumulator and the
+/// encoder each need several bytes per pixel.
+const MAX_OUTPUT_PIXELS: u64 = 120_000_000;
 
 pub struct Options {
     pub input: PathBuf,
@@ -161,6 +164,13 @@ pub fn run(o: &Options, bytes: &[u8], engine: &mut dyn Engine) -> Result<Summary
     let photo = decode(bytes)?;
     if photo.had_alpha {
         eprintln!("Note: transparency is not kept; the photo is written without it.");
+    }
+    let out_px = (photo.plane.w as u64 * photo.plane.h as u64) * (engine.scale() as u64).pow(2);
+    if out_px > MAX_OUTPUT_PIXELS {
+        bail!(
+            "enlarged {}x it would be {out_px} pixels; the limit is {MAX_OUTPUT_PIXELS}. Use a smaller --scale",
+            engine.scale()
+        );
     }
     let big = engine.process_plane(&photo.plane)?;
     // Write beside the target first, so a failure never leaves half a file.

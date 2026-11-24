@@ -78,7 +78,14 @@ pub fn fetch(dir: &Path, m: &Model) -> Result<PathBuf> {
     let dest = dir.join(m.file);
     let part = dir.join(format!("{}.part", m.file));
     let url = format!("{BASE}/{}", m.file);
-    let resp = ureq::get(&url)
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .https_only(true)
+        .timeout_global(Some(std::time::Duration::from_secs(900)))
+        .timeout_connect(Some(std::time::Duration::from_secs(20)))
+        .build()
+        .into();
+    let resp = agent
+        .get(&url)
         .call()
         .with_context(|| format!("cannot download {url}"))?;
     let mut body = resp.into_body().into_reader().take(m.bytes + 1);

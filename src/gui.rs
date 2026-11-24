@@ -320,7 +320,7 @@ fn setup_style(ctx: &egui::Context) {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.poll();
         if self.run.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
@@ -350,12 +350,17 @@ impl eframe::App for App {
                 self.s.sigma = Some(u); // already tweaking by hand: start from the suggestion
             }
         }
+    }
+
+    fn ui(&mut self, root: &mut egui::Ui, _: &mut eframe::Frame) {
+        let ctx = root.ctx().clone();
+        let ctx = &ctx;
         let running = self.phase == Phase::Running;
         let photo = job::is_photo(&self.s.input);
 
-        egui::SidePanel::left("settings")
-            .min_width(300.0)
-            .show(ctx, |ui| {
+        egui::Panel::left("settings")
+            .min_size(300.0)
+            .show(root, |ui| {
                 ui.add_enabled_ui(!running, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         ui.heading("Settings");
@@ -404,7 +409,6 @@ impl eframe::App for App {
                                 egui::Slider::new(&mut self.s.jxl_distance, 0.1..=3.0)
                                     .text("JXL distance (lower = bigger file)"),
                             );
-                            ui.checkbox(&mut self.s.overwrite, "Replace the result if it exists");
                         } else {
                             ui.separator();
                             ui.checkbox(
@@ -510,6 +514,7 @@ impl eframe::App for App {
                             ui.checkbox(&mut self.restart, "Start over (ignore unfinished work)");
                         }
                         ui.separator();
+                        ui.checkbox(&mut self.s.overwrite, "Replace the result file if it exists");
                         ui.label(RichText::new("Hardware").strong());
                         egui::ComboBox::from_label("Run on")
                             .selected_text(self.s.device.clone())
@@ -529,7 +534,7 @@ impl eframe::App for App {
                 });
             });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(root, |ui| {
             ui.add_enabled_ui(!running, |ui| {
                 ui.horizontal(|ui| {
                     if ui.button("Choose a video or photo…").clicked()
