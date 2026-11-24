@@ -200,6 +200,8 @@ pub struct Suggestion {
     pub ai_upscaler: bool,
     pub grain: u32,
     pub crf: u32,
+    /// Black edges to cut: left, right, top, bottom (even numbers).
+    pub crop: Option<[u32; 4]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -276,10 +278,14 @@ pub fn recommend(info: &VideoInfo, measures: &[Measure], have: Available) -> Rep
         v.sort_unstable();
         v.get(v.len() / 2).copied().unwrap_or(0)
     });
-    if edges.iter().any(|&e| e >= 4) {
-        notes.push(format!(
-            "Black edges (left {}, right {}, top {}, bottom {} pixels). They are kept: cropping is not offered yet.",
-            edges[0], edges[1], edges[2], edges[3]
+    // Rounded up to even, so no sliver of black is left.
+    let crop = edges
+        .iter()
+        .any(|&e| e >= 4)
+        .then(|| edges.map(|e| (e as u32).next_multiple_of(2)));
+    if let Some([l, r, t, b]) = crop {
+        reasons.push(format!(
+            "Black edges (left {l}, right {r}, top {t}, bottom {b} pixels): cut them off."
         ));
     }
     let casts: Vec<(f32, f32)> = measures.iter().filter_map(|m| m.cast).collect();
@@ -297,8 +303,9 @@ pub fn recommend(info: &VideoInfo, measures: &[Measure], have: Available) -> Rep
                 (_, _, true, _) => "yellow",
                 _ => "cyan",
             };
+            let (su, sv) = (u.round() as i32, v.round() as i32);
             notes.push(format!(
-                "Whitish areas lean {tint}: possibly a colour cast (a sky counts as whitish too). Colour correction is not offered yet."
+                "Whitish areas lean {tint}: possibly a colour cast, though a sky counts as whitish too, so it is not applied. To try correcting it: --colour-shift {su}:{sv} (check with --preview)."
             ));
         }
     }
@@ -328,6 +335,7 @@ pub fn recommend(info: &VideoInfo, measures: &[Measure], have: Available) -> Rep
             ai_upscaler,
             grain,
             crf: 18,
+            crop,
         },
         reasons,
         notes,
@@ -499,7 +507,12 @@ mod tests {
             "{:?}",
             r.notes
         );
-        assert!(r.notes.iter().any(|n| n.contains("Black edges")));
+        assert_eq!(r.suggestion.crop, Some([10, 0, 0, 0]));
+        assert!(
+            r.notes.iter().any(|n| n.contains("--colour-shift 10:11")),
+            "{:?}",
+            r.notes
+        );
     }
 
     #[test]

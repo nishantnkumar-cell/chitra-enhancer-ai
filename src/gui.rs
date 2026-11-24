@@ -593,6 +593,31 @@ impl eframe::App for App {
                                 }
                             });
                             self.s.grain = on.then(|| g.unwrap_or(3.0) as u32);
+                            let mut crop = self.s.crop.is_some();
+                            ui.checkbox(&mut crop, "Cut black edges");
+                            if crop {
+                                let c = self.s.crop.get_or_insert([0; 4]);
+                                ui.horizontal(|ui| {
+                                    for (v, name) in c.iter_mut().zip(["L", "R", "T", "B"]) {
+                                        ui.label(name);
+                                        ui.add(
+                                            egui::DragValue::new(v).range(0..=400).speed(2),
+                                        );
+                                        *v -= *v % 2;
+                                    }
+                                });
+                            } else {
+                                self.s.crop = None;
+                            }
+                            let mut tint = self.s.colour_shift.is_some();
+                            ui.checkbox(&mut tint, "Correct a colour cast");
+                            if tint {
+                                let (u, v) = self.s.colour_shift.get_or_insert((0, 0));
+                                ui.add(egui::Slider::new(u, -40..=40).text("less blue"));
+                                ui.add(egui::Slider::new(v, -40..=40).text("less red"));
+                            } else {
+                                self.s.colour_shift = None;
+                            }
                             ui.collapsing("Advanced", |ui| {
                                 let mut crf = self.s.crf;
                                 ui.horizontal(|ui| {

@@ -219,6 +219,8 @@ fn a_temporal_stage_keeps_every_frame_of_every_chunk() {
         keep_work: false,
         grain: 0,
         stop_after_chunks: None,
+        crop: None,
+        colour_shift: None,
     };
     let mut engine = Lanczos::new(1);
     let mut temporal = Identity;
@@ -579,6 +581,40 @@ fn a_dvd_image_is_listed_analysed_and_restored() {
     );
     assert!(made.iter().all(|n| n.ends_with(".mp4")), "{made:?}");
     assert!(!run(&["-o", "x.mp4", "--title", "98"]).status.success());
+}
+
+#[test]
+fn black_edges_can_be_cut_and_a_preview_estimates_the_whole_job() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let (i, o) = (d.path().join("in.mp4"), d.path().join("out.mp4"));
+    make_clip(&i);
+    let run = |out: &std::path::Path, extra: &[&str]| {
+        bin()
+            .args(["-i", i.to_str().unwrap(), "-o", out.to_str().unwrap()])
+            .args(["--scale", "1", "--denoise", "off", "--codec", "h264"])
+            .args(["--preset", "ultrafast", "--grain", "0"])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let r = run(&o, &["--crop", "10:6:2:2", "--colour-shift", "-5:3"]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    assert_eq!(frames(&o).0, "144,116,75");
+    let r = run(&d.path().join("p.mp4"), &["--preview", "1"]);
+    assert!(r.status.success());
+    assert!(String::from_utf8_lossy(&r.stderr).contains("whole video would take about"));
+    for bad in [
+        ["--crop", "3:0:0:0"],
+        ["--crop", "100:100:0:0"],
+        ["--colour-shift", "90:0"],
+    ] {
+        let r = run(&d.path().join("bad.mp4"), &bad);
+        assert!(!r.status.success(), "{bad:?}");
+    }
+    assert!(!d.path().join("bad.mp4").exists());
 }
 
 #[test]

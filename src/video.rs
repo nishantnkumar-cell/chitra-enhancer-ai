@@ -110,6 +110,11 @@ pub struct Options {
     pub keep_work: bool,
     /// Film grain strength put back before encoding (0 = none).
     pub grain: u32,
+    /// Pixels to cut from the source picture: left, right, top, bottom.
+    pub crop: Option<[u32; 4]>,
+    /// Amounts subtracted from the two colour channels (blue, red) to remove a
+    /// colour cast.
+    pub colour_shift: Option<(i32, i32)>,
     /// For tests: stop (as if by Ctrl-C) after this many chunks of this run.
     pub stop_after_chunks: Option<usize>,
 }
@@ -158,15 +163,50 @@ impl Options {
         }
     }
 
+    /// The video as it is after cropping.
+    fn cropped(&self, info: &VideoInfo) -> VideoInfo {
+        let mut c = info.clone();
+        if let Some([l, r, t, b]) = self.crop {
+            c.width = info.width.saturating_sub(l.saturating_add(r));
+            c.height = info.height.saturating_sub(t.saturating_add(b));
+        }
+        c
+    }
+
+    /// Why the crop or colour settings cannot be used with this video, if so.
+    pub fn check_picture(&self, info: &VideoInfo) -> Result<()> {
+        if let Some(c) = self.crop {
+            if c.iter().any(|v| v % 2 != 0) {
+                bail!("--crop values must be even numbers");
+            }
+            let left = self.cropped(info);
+            if left.width < 16 || left.height < 16 {
+                bail!(
+                    "--crop leaves {}x{} of a {}x{} picture; at least 16x16 must remain",
+                    left.width,
+                    left.height,
+                    info.width,
+                    info.height
+                );
+            }
+        }
+        if let Some((u, v)) = self.colour_shift
+            && (u.abs() > 40 || v.abs() > 40)
+        {
+            bail!("--colour-shift values must be -40 to 40");
+        }
+        Ok(())
+    }
+
     /// The size of the frames the engine receives: square pixels, even sides.
-    fn frame_size(info: &VideoInfo) -> (usize, usize) {
-        let (w, h) = info.square_size();
+    fn frame_size(&self, info: &VideoInfo) -> (usize, usize) {
+        let (w, h) = self.cropped(info).square_size();
         ((w & !1) as usize, (h & !1) as usize)
     }
 
     /// `frame_size` as (width, height) numbers.
     pub fn frame_dims(&self, info: &VideoInfo) -> (usize, usize) {
-        Self::frame_size(info)
+        self.frame_size(info)
     }
 
     /// The frame rate of the result.
@@ -191,14 +231,25 @@ impl Options {
             };
             f.push(format!("bwdif=mode={mode}:parity=auto:deint=all"));
         }
+        let cut = self.cropped(info);
+        if let Some([l, _, t, _]) = self.crop {
+            f.push(format!("crop={}:{}:{l}:{t}", cut.width, cut.height));
+        }
         if let Some(d) = self.denoise.filter() {
             f.push(d.to_string());
         }
-        let (sw, sh) = info.square_size();
-        if (sw, sh) != (info.width, info.height) {
+        if let Some((u, v)) = self.colour_shift
+            && (u, v) != (0, 0)
+        {
+            f.push(format!(
+                "format=yuv444p,lutyuv=u=clip(val-({u})\\,0\\,255):v=clip(val-({v})\\,0\\,255)"
+            ));
+        }
+        let (sw, sh) = cut.square_size();
+        if (sw, sh) != (cut.width, cut.height) {
             f.push(format!("scale={sw}:{sh}:flags=lanczos"));
         }
-        let (ew, eh) = Self::frame_size(info);
+        let (ew, eh) = self.frame_size(info);
         if (ew as u32, eh as u32) != (sw, sh) {
             f.push(format!("crop={ew}:{eh}:0:0"));
         }
@@ -269,7 +320,7 @@ impl Options {
         temporal: Option<&dyn Temporal>,
     ) -> String {
         format!(
-            "v2|{}|{:?}|{:?}|{}|{:?}|{:?}|{:?}|{}|{}|{}|{}",
+            "v3|{}|{:?}|{:?}|{}|{:?}|{:?}|{:?}|{}|{}|{}|{}|{:?}|{:?}",
             self.input.display(),
             self.denoise,
             self.deinterlace,
@@ -281,6 +332,8 @@ impl Options {
             self.grain,
             temporal.map_or("none".to_string(), |t| t.describe()),
             format_args!("{} {}x{}", engine.describe(), info.width, info.height),
+            self.crop,
+            self.colour_shift,
         )
     }
 }
@@ -337,7 +390,7 @@ fn run_chunk(
     part: &Path,
     bar: &ProgressBar,
 ) -> Result<u64> {
-    let (w, h) = Options::frame_size(info);
+    let (w, h) = o.frame_size(info);
     let s = engine.scale();
     let (ow, oh) = (w * s, h * s);
     let (fn_, fd) = o.out_fps(info);
@@ -496,8 +549,9 @@ fn assemble(o: &Options, info: &VideoInfo, work: &Path, chunks: usize) -> Result
 /// model's working memory and the tile accumulator all grow with it.
 pub const MAX_OUTPUT_PIXELS: u64 = 100_000_000;
 
-fn check_output_size(info: &VideoInfo, scale: usize) -> Result<()> {
-    let (w, h) = Options::frame_size(info);
+fn check_output_size(o: &Options, info: &VideoInfo, scale: usize) -> Result<()> {
+    o.check_picture(info)?;
+    let (w, h) = o.frame_size(info);
     let px = (w as u64) * (h as u64) * (scale as u64) * (scale as u64);
     if px > MAX_OUTPUT_PIXELS {
         bail!(
@@ -514,6 +568,8 @@ pub struct Preview {
     pub clip: PathBuf,
     /// A still: the original on the left, the result on the right.
     pub compare: PathBuf,
+    /// How long the whole video would take at the speed of this preview.
+    pub whole: std::time::Duration,
 }
 
 /// Processes only `secs` seconds from the middle of the video, with the real
@@ -529,7 +585,7 @@ pub fn preview(
     if secs <= 0.0 {
         bail!("--preview needs a number of seconds above 0");
     }
-    check_output_size(info, engine.scale())?;
+    check_output_size(o, info, engine.scale())?;
     if o.input == o.output {
         bail!("the output must not be the input");
     }
@@ -539,8 +595,12 @@ pub fn preview(
     let total = (dur * fn_ as f64 / fd as f64).ceil() as u64;
     let bar = ProgressBar::with_draw_target(Some(total), indicatif::ProgressDrawTarget::hidden());
     let part = o.output.with_extension("preview.part.mkv");
-    run_chunk(o, info, engine, temporal, start, dur, &part, &bar)
+    let started = Instant::now();
+    let made = run_chunk(o, info, engine, temporal, start, dur, &part, &bar)
         .inspect_err(|_| _ = std::fs::remove_file(&part))?;
+    let per_frame = started.elapsed().as_secs_f64() / made.max(1) as f64;
+    let all_frames = info.duration * f64::from(fn_) / f64::from(fd);
+    let whole = std::time::Duration::from_secs_f64(per_frame * all_frames);
 
     let mp4ish = matches!(ext(&o.output).as_str(), "mp4" | "m4v" | "mov");
     let mut cmd = Command::new(&o.tools.ffmpeg);
@@ -560,10 +620,11 @@ pub fn preview(
     }
 
     // One frame from the middle, before and after, side by side.
-    let (w, h) = Options::frame_size(info);
+    let (w, h) = o.frame_size(info);
     let (ow, oh) = (w * engine.scale(), h * engine.scale());
     let mut plain = o.clone();
     plain.denoise = Denoise::Off;
+    plain.colour_shift = None;
     let compare = o.output.with_extension("compare.png");
     let graph = format!(
         "[0:v]{},scale={ow}:{oh}:flags=neighbor,setsar=1[a];[1:v]scale={ow}:{oh},setsar=1[b];[a][b]hstack",
@@ -588,6 +649,7 @@ pub fn preview(
     Ok(Preview {
         clip: o.output.clone(),
         compare,
+        whole,
     })
 }
 
@@ -602,7 +664,7 @@ pub fn run(
     if !(1.0..=86_400.0).contains(&o.chunk_secs) {
         bail!("--chunk-seconds must be 1 to 86400");
     }
-    check_output_size(info, engine.scale())?;
+    check_output_size(o, info, engine.scale())?;
     if o.input == o.output {
         bail!("the output must not be the input");
     }
@@ -749,6 +811,8 @@ mod tests {
             keep_work: false,
             grain: 0,
             stop_after_chunks: None,
+            crop: None,
+            colour_shift: None,
         }
     }
 
@@ -777,6 +841,30 @@ mod tests {
     }
 
     #[test]
+    fn cropping_and_colour_come_before_squaring_the_pixels() {
+        let mut o = opts();
+        o.crop = Some([10, 6, 0, 2]);
+        o.colour_shift = Some((8, -3));
+        let f = o.decode_filters(&dv());
+        assert!(f.contains("crop=704:478:10:0,hqdn3d"), "{f}");
+        assert!(f.contains("lutyuv=u=clip(val-(8)"), "{f}");
+        assert!(f.contains("v=clip(val-(-3)"), "{f}");
+        // 704 wide with 8:9 pixels is 625.8, kept even.
+        assert!(
+            f.contains("scale=624:478") || f.contains("scale=626:478"),
+            "{f}"
+        );
+        assert!(o.check_picture(&dv()).is_ok());
+        o.crop = Some([3, 0, 0, 0]);
+        assert!(o.check_picture(&dv()).is_err(), "odd");
+        o.crop = Some([400, 400, 0, 0]);
+        assert!(o.check_picture(&dv()).is_err(), "nothing left");
+        o.crop = None;
+        o.colour_shift = Some((99, 0));
+        assert!(o.check_picture(&dv()).is_err(), "out of range");
+    }
+
+    #[test]
     fn grain_is_added_only_when_asked() {
         let mut o = opts();
         assert!(o.grain_filter().is_empty());
@@ -802,7 +890,7 @@ mod tests {
             "crop=160:98:0:0,setsar=1,format=rgb24"
         );
         assert_eq!(o.out_fps(&v), (30000, 1001));
-        assert_eq!(Options::frame_size(&v), (160, 98));
+        assert_eq!(o.frame_size(&v), (160, 98));
     }
 
     #[test]
