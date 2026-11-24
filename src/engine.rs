@@ -6,6 +6,37 @@ use anyhow::{Context, Result};
 use fast_image_resize::images::Image;
 use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
 
+use crate::infer::{plane_from_rgb8, rgb8_from_plane};
+use crate::tiler::Plane;
+
+/// Resizes a float picture with Lanczos3 (no 8-bit rounding in between).
+pub fn resize_plane(resizer: &mut Resizer, src: &Plane, nw: usize, nh: usize) -> Result<Plane> {
+    let bytes: Vec<u8> = src.data.iter().flat_map(|v| v.to_ne_bytes()).collect();
+    let img = Image::from_vec_u8(src.w as u32, src.h as u32, bytes, PixelType::F32x3)
+        .context("a picture of the wrong size")?;
+    let mut dst = Image::new(nw as u32, nh as u32, PixelType::F32x3);
+    resizer
+        .resize(
+            &img,
+            &mut dst,
+            &ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Lanczos3)),
+        )
+        .context("resizing a picture")?;
+    let data = dst
+        .buffer()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_ne_bytes(*b).clamp(0.0, 1.0))
+        .collect();
+    Ok(Plane {
+        w: nw,
+        h: nh,
+        c: 3,
+        data,
+    })
+}
+
 pub trait Engine {
     /// How many times larger the frames come out.
     fn scale(&self) -> usize;
@@ -13,6 +44,16 @@ pub trait Engine {
     fn process(&mut self, rgb: &[u8], w: usize, h: usize) -> Result<Vec<u8>>;
     /// A line for the log.
     fn describe(&self) -> String;
+    /// A whole picture in 0..=1 floats, `scale` times larger. Engines that can
+    /// keep more than 8 bits override this; the default goes through 8 bits.
+    fn process_plane(&mut self, src: &Plane) -> Result<Plane> {
+        let out = self.process(&rgb8_from_plane(src), src.w, src.h)?;
+        Ok(plane_from_rgb8(
+            &out,
+            src.w * self.scale(),
+            src.h * self.scale(),
+        ))
+    }
 }
 
 /// Resizes `rgb` (w x h, 8-bit RGB) to `nw` x `nh` with Lanczos3.
@@ -80,6 +121,16 @@ impl Engine for Rescaled {
     fn describe(&self) -> String {
         format!("{}, resized to {}x", self.inner.describe(), self.target)
     }
+
+    fn process_plane(&mut self, src: &Plane) -> Result<Plane> {
+        let big = self.inner.process_plane(src)?;
+        resize_plane(
+            &mut self.resizer,
+            &big,
+            src.w * self.target,
+            src.h * self.target,
+        )
+    }
 }
 
 /// A Lanczos3 resize: the baseline, and the choice when there is no model.
@@ -125,6 +176,18 @@ impl Engine for Lanczos {
 
     fn describe(&self) -> String {
         format!("Lanczos {}x (no AI model)", self.scale)
+    }
+
+    fn process_plane(&mut self, src: &Plane) -> Result<Plane> {
+        if self.scale == 1 {
+            return Ok(src.clone());
+        }
+        resize_plane(
+            &mut self.resizer,
+            src,
+            src.w * self.scale,
+            src.h * self.scale,
+        )
     }
 }
 

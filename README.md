@@ -19,6 +19,24 @@ Work is done in **chunks** (`--chunk-seconds`, default 30). Press Ctrl-C at any 
 run the same command again to carry on from the first unfinished chunk. Changed
 settings or input are refused unless you add `--restart`.
 
+## Photos
+
+```
+chitra-enhance -i old.jpg -o old-2x.jxl --model realesr-2x.onnx
+```
+
+The mode is chosen from the input (JPEG, PNG, WebP, BMP, GIF, TIFF). Output is
+a **16-bit** JPEG XL (`--jxl-distance 1.0` is visually lossless) or 16-bit PNG,
+with the colour profile and EXIF kept. The photo is rotated by its EXIF tag and
+the tag reset, so it is not rotated twice. The source is never overwritten and
+an existing output needs `--force`.
+
+For JPEGs the quality is read from the file's quantisation tables. **Clean**
+files (quality about 85 and up) are only enlarged; **compressed** files (below
+that, or 4:2:0 chroma below 92) use `--model-compressed` if you give one, e.g. a
+JPEG-artifact remover. Big photos are tiled (`--tile-size`, `--vram-budget`).
+Transparency is not kept.
+
 ## Needs
 
 * FFmpeg and ffprobe on the PATH (or `--ffmpeg PATH`).
@@ -43,6 +61,12 @@ On a CPU the FP32 file is the faster one; on a GPU use FP16.
 
 ## Status
 
-Video pipeline, resume, tiler, ONNX engine, grain and 1-4x scaling work, tested
-with a real Real-ESRGAN model. Not yet: photo mode (JPEG tiering, JXL output),
-video-aware (multi-frame) denoise models.
+Video pipeline, resume, tiler, ONNX engine, grain, 1-4x scaling and photo mode
+(JPEG quality tiers, 16-bit JXL/PNG) work, tested with a real Real-ESRGAN model.
+Not yet: video-aware (multi-frame) denoise models, a GUI, CI.
+
+## Licence
+
+AGPL-3.0-or-later (see `LICENSE`), the same as Chitra, because the JPEG XL
+writer (`jxl-encoder`) is AGPL or commercial. FFmpeg and ONNX Runtime are
+separate programs/libraries that you install yourself.

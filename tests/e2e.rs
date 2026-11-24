@@ -189,3 +189,51 @@ fn an_onnx_model_doubles_the_frame_size() {
     assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
     assert_eq!(frames(&o).0, "320,240,75");
 }
+
+#[test]
+fn photo_mode_writes_16_bit_png_and_refuses_to_overwrite() {
+    let d = tempfile::tempdir().unwrap();
+    let i = d.path().join("p.png");
+    let img = image::RgbImage::from_fn(30, 20, |x, y| {
+        image::Rgb([(x * 8) as u8, (y * 12) as u8, 90])
+    });
+    img.save(&i).unwrap();
+    let o = d.path().join("big.png");
+    let run = |extra: &[&str]| {
+        bin()
+            .args([
+                "-i",
+                i.to_str().unwrap(),
+                "-o",
+                o.to_str().unwrap(),
+                "--scale",
+                "2",
+            ])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let r = run(&[]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    assert!(String::from_utf8_lossy(&r.stderr).contains("30x20 -> 60x40"));
+    let again = run(&[]);
+    assert!(!again.status.success());
+    assert!(String::from_utf8_lossy(&again.stderr).contains("--force"));
+    assert!(run(&["--force"]).status.success());
+    let jxl = d.path().join("big.jxl");
+    let r = bin()
+        .args([
+            "-i",
+            i.to_str().unwrap(),
+            "-o",
+            jxl.to_str().unwrap(),
+            "--scale",
+            "2",
+            "--jxl-distance",
+            "0.5",
+        ])
+        .output()
+        .unwrap();
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    assert!(jxl.metadata().unwrap().len() > 0);
+}

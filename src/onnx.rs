@@ -101,7 +101,12 @@ fn is_out_of_memory(e: &ort::Error) -> bool {
 
 impl OnnxEngine {
     /// Loads `model` and works out its scale by running one small tile.
-    pub fn load(model: &Path, device: Device, vram_mb: usize) -> Result<OnnxEngine> {
+    pub fn load(
+        model: &Path,
+        device: Device,
+        vram_mb: usize,
+        tile: Option<usize>,
+    ) -> Result<OnnxEngine> {
         let lib = std::env::var_os("ORT_DYLIB_PATH").context(
             "ONNX Runtime is not set up: set ORT_DYLIB_PATH to the ONNX Runtime library \
              (libonnxruntime.so, onnxruntime.dll or libonnxruntime.dylib)",
@@ -136,7 +141,10 @@ impl OnnxEngine {
             session,
             half,
             scale: 1,
-            tile: tile_for_budget(vram_mb, 2, if half { 2 } else { 4 }),
+            tile: tile.map_or_else(
+                || tile_for_budget(vram_mb, 2, if half { 2 } else { 4 }),
+                |t| t.clamp(64, 1024),
+            ),
             in_name,
             out_name,
             label: String::new(),
@@ -226,5 +234,9 @@ impl Engine for OnnxEngine {
 
     fn describe(&self) -> String {
         self.label.clone()
+    }
+
+    fn process_plane(&mut self, src: &Plane) -> Result<Plane> {
+        self.upscale_plane(src)
     }
 }

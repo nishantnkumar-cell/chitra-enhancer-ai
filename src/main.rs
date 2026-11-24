@@ -46,7 +46,7 @@ struct Args {
     double_rate: bool,
     #[arg(long, value_enum, default_value_t = Codec::H265)]
     codec: Codec,
-    /// Quality (lower is better; codec default if not given).
+    /// Video quality (lower is better; codec default if not given).
     #[arg(long)]
     crf: Option<u32>,
     #[arg(long)]
@@ -66,6 +66,20 @@ struct Args {
     /// Only report what was found in the input and what would be done.
     #[arg(long)]
     dry_run: bool,
+    /// Photos: JPEG XL quality as a distance (1.0 is visually lossless; 0.5
+    /// is better, 2.0 smaller).
+    #[arg(long, default_value_t = 1.0)]
+    jxl_distance: f32,
+    /// Replace an existing output file (never the input).
+    #[arg(long)]
+    force: bool,
+    /// Photos: a separate model for heavily compressed JPEGs (quality below
+    /// about 85), for instance a JPEG-artifact remover.
+    #[arg(long)]
+    model_compressed: Option<PathBuf>,
+    /// Starting tile size in pixels (default from --vram-budget).
+    #[arg(long)]
+    tile_size: Option<usize>,
     #[arg(long, hide = true)]
     stop_after_chunks: Option<usize>,
 }
@@ -96,6 +110,9 @@ fn real_main() -> Result<()> {
     }
     if a.grain.is_some_and(|g| g > 30) {
         bail!("--grain must be 0 to 30");
+    }
+    if is_photo(&a.input) {
+        return photo_mode(&a);
     }
     let tools = Tools::locate(a.ffmpeg.as_deref())?;
     let info = ffmpeg::probe(&tools, &a.input)?;
@@ -132,11 +149,7 @@ fn real_main() -> Result<()> {
     };
     let mut engine: Box<dyn Engine> = match &a.model {
         #[cfg(feature = "onnx")]
-        Some(m) => Box::new(chitra_enhance::onnx::OnnxEngine::load(
-            m,
-            a.device,
-            a.vram_budget * 1024,
-        )?),
+        Some(m) => load_model(m, a.device, a.vram_budget, a.tile_size)?,
         #[cfg(not(feature = "onnx"))]
         Some(_) => bail!(
             "this build has no AI model support: rebuild with `cargo build --release --features onnx`"
@@ -160,6 +173,89 @@ fn real_main() -> Result<()> {
         s.resumed,
         s.seconds,
         o.output.display()
+    );
+    Ok(())
+}
+
+fn is_photo(p: &std::path::Path) -> bool {
+    matches!(
+        p.extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .as_deref(),
+        Some("jpg" | "jpeg" | "png" | "webp" | "bmp" | "gif" | "tif" | "tiff")
+    )
+}
+
+#[cfg(feature = "onnx")]
+fn load_model(
+    m: &std::path::Path,
+    device: chitra_enhance::onnx::Device,
+    vram_gb: usize,
+    tile: Option<usize>,
+) -> Result<Box<dyn Engine>> {
+    Ok(Box::new(chitra_enhance::onnx::OnnxEngine::load(
+        m,
+        device,
+        vram_gb * 1024,
+        tile,
+    )?))
+}
+
+fn photo_mode(a: &Args) -> Result<()> {
+    use chitra_enhance::{inspector, photo};
+    let bytes = std::fs::read(&a.input)?;
+    let mut model = a.model.clone();
+    if let Some(info) = inspector::inspect(&bytes) {
+        let tier = info.tier();
+        eprintln!(
+            "JPEG {}x{}, quality about {}, {:?} chroma: {}",
+            info.width,
+            info.height,
+            info.estimated_quality(),
+            info.subsampling,
+            match tier {
+                inspector::Tier::Clean => "clean, upscaling only",
+                inspector::Tier::Compressed => "compressed, artifacts will be cleaned",
+            }
+        );
+        if tier == inspector::Tier::Compressed
+            && let Some(m) = &a.model_compressed
+        {
+            model = Some(m.clone());
+        }
+    }
+    let mut engine: Box<dyn Engine> = match &model {
+        #[cfg(feature = "onnx")]
+        Some(m) => load_model(m, a.device, a.vram_budget, a.tile_size)?,
+        #[cfg(not(feature = "onnx"))]
+        Some(_) => bail!(
+            "this build has no AI model support: rebuild with `cargo build --release --features onnx`"
+        ),
+        None => Box::new(Lanczos::new(a.scale.unwrap_or(2))),
+    };
+    if let Some(t) = a.scale {
+        engine = Rescaled::wrap(engine, t);
+    }
+    eprintln!("Engine: {}", engine.describe());
+    let o = photo::Options {
+        input: a.input.clone(),
+        output: a.output.clone(),
+        jxl_distance: a.jxl_distance,
+        force: a.force,
+    };
+    if a.dry_run {
+        photo::check_paths(&o.input, &o.output, o.force)?;
+        return Ok(());
+    }
+    let s = photo::run(&o, &bytes, engine.as_mut())?;
+    eprintln!(
+        "Done: {}x{} -> {}x{}, {} KB -> {}",
+        s.in_size.0,
+        s.in_size.1,
+        s.out_size.0,
+        s.out_size.1,
+        s.bytes / 1024,
+        a.output.display()
     );
     Ok(())
 }
