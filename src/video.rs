@@ -492,6 +492,23 @@ fn assemble(o: &Options, info: &VideoInfo, work: &Path, chunks: usize) -> Result
     Ok(())
 }
 
+/// Largest enlarged frame, in pixels (about 11K x 6K): frame buffers, the
+/// model's working memory and the tile accumulator all grow with it.
+pub const MAX_OUTPUT_PIXELS: u64 = 100_000_000;
+
+fn check_output_size(info: &VideoInfo, scale: usize) -> Result<()> {
+    let (w, h) = Options::frame_size(info);
+    let px = (w as u64) * (h as u64) * (scale as u64) * (scale as u64);
+    if px > MAX_OUTPUT_PIXELS {
+        bail!(
+            "{}x{} enlarged {scale}x is {px} pixels a frame; the limit is {MAX_OUTPUT_PIXELS}. Use a smaller --scale",
+            w * scale,
+            h * scale
+        );
+    }
+    Ok(())
+}
+
 /// What `preview` made.
 pub struct Preview {
     pub clip: PathBuf,
@@ -512,6 +529,7 @@ pub fn preview(
     if secs <= 0.0 {
         bail!("--preview needs a number of seconds above 0");
     }
+    check_output_size(info, engine.scale())?;
     if o.input == o.output {
         bail!("the output must not be the input");
     }
@@ -581,9 +599,10 @@ pub fn run(
     info: &VideoInfo,
 ) -> Result<Summary> {
     let started = Instant::now();
-    if o.chunk_secs < 1.0 {
-        bail!("--chunk-seconds must be at least 1");
+    if !(1.0..=86_400.0).contains(&o.chunk_secs) {
+        bail!("--chunk-seconds must be 1 to 86400");
     }
+    check_output_size(info, engine.scale())?;
     if o.input == o.output {
         bail!("the output must not be the input");
     }

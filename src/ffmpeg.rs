@@ -89,6 +89,44 @@ fn ratio(s: &str) -> Option<(u32, u32)> {
     Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
 }
 
+/// Limits on what a video may declare about itself. The numbers come from the
+/// file, which may be hostile or corrupt; they size memory and loop counts, so
+/// they are bounded here, before anything is allocated from them.
+pub const MAX_SIDE: u32 = 16_384;
+pub const MAX_PIXELS: u64 = 70_000_000;
+pub const MAX_SECONDS: f64 = 7.0 * 86_400.0;
+
+fn checked(info: VideoInfo) -> Result<VideoInfo> {
+    let (w, h) = (info.width, info.height);
+    if !(16..=MAX_SIDE).contains(&w) || !(16..=MAX_SIDE).contains(&h) {
+        bail!(
+            "the video declares an unusable size ({w}x{h}); 16 to {MAX_SIDE} pixels a side are supported"
+        );
+    }
+    if u64::from(w) * u64::from(h) > MAX_PIXELS {
+        bail!("the video is too large ({w}x{h}); at most {MAX_PIXELS} pixels per frame");
+    }
+    let fps = info.fps();
+    if !(0.1..=1000.0).contains(&fps) {
+        bail!("the video declares an unusable frame rate ({fps:.3})");
+    }
+    if !info.duration.is_finite() || info.duration <= 0.0 || info.duration > MAX_SECONDS {
+        bail!(
+            "the video declares an unusable length ({} s)",
+            info.duration
+        );
+    }
+    let (n, d) = info.sar;
+    if n > 10_000 || d > 10_000 || !(0.1..=10.0).contains(&(f64::from(n) / f64::from(d.max(1)))) {
+        bail!("the video declares an unusable pixel shape ({n}:{d})");
+    }
+    let (sw, sh) = info.square_size();
+    if sw > MAX_SIDE || sh > MAX_SIDE || u64::from(sw) * u64::from(sh) > MAX_PIXELS {
+        bail!("the video is too large once its pixels are made square ({sw}x{sh})");
+    }
+    Ok(info)
+}
+
 /// Reads ffprobe's JSON (`-show_streams -show_format`).
 pub fn parse_probe(json: &str) -> Result<VideoInfo> {
     let v: Value = serde_json::from_str(json).context("ffprobe gave no JSON")?;
@@ -97,8 +135,11 @@ pub fn parse_probe(json: &str) -> Result<VideoInfo> {
         .iter()
         .find(|s| s["codec_type"] == "video")
         .context("the file has no video stream")?;
-    let width = video["width"].as_u64().context("no width")? as u32;
-    let height = video["height"].as_u64().context("no height")? as u32;
+    let side = |k: &str| -> Result<u32> {
+        u32::try_from(video[k].as_u64().with_context(|| format!("no {k}"))?)
+            .map_err(|_| anyhow::anyhow!("the video declares an impossible {k}"))
+    };
+    let (width, height) = (side("width")?, side("height")?);
     let (fps_num, fps_den) = video["avg_frame_rate"]
         .as_str()
         .and_then(ratio)
@@ -119,7 +160,7 @@ pub fn parse_probe(json: &str) -> Result<VideoInfo> {
         .and_then(ratio)
         .filter(|&(n, d)| n > 0 && d > 0)
         .unwrap_or((1, 1));
-    Ok(VideoInfo {
+    checked(VideoInfo {
         width,
         height,
         fps_num,
@@ -164,6 +205,69 @@ mod tests {
        "r_frame_rate":"30000/1001","field_order":"bb","sample_aspect_ratio":"8:9",
        "duration":"61.061","nb_frames":"1830"},
       {"codec_type":"audio"}],"format":{"duration":"61.1"}}"#;
+
+    fn with(width: &str, height: &str, fps: &str, dur: &str, sar: &str) -> String {
+        format!(
+            r#"{{"streams":[{{"codec_type":"video","width":{width},"height":{height},
+            "avg_frame_rate":"{fps}","sample_aspect_ratio":"{sar}","duration":"{dur}"}}],
+            "format":{{}}}}"#
+        )
+    }
+
+    #[test]
+    fn hostile_or_corrupt_numbers_are_refused_before_they_size_anything() {
+        assert!(parse_probe(&with("1920", "1080", "25/1", "60", "1:1")).is_ok());
+        for (w, h, f, d, sar, why) in [
+            (
+                "4294968016",
+                "480",
+                "25/1",
+                "10",
+                "1:1",
+                "width that wraps to 720 in 32 bits",
+            ),
+            ("100000", "100000", "25/1", "10", "1:1", "huge frame"),
+            ("0", "480", "25/1", "10", "1:1", "zero width"),
+            (
+                "720",
+                "480",
+                "4000000000/1",
+                "10",
+                "1:1",
+                "absurd frame rate",
+            ),
+            (
+                "720",
+                "480",
+                "1/4000000000",
+                "10",
+                "1:1",
+                "frame rate near zero",
+            ),
+            ("720", "480", "25/1", "inf", "1:1", "infinite length"),
+            ("720", "480", "25/1", "nan", "1:1", "NaN length"),
+            ("720", "480", "25/1", "-5", "1:1", "negative length"),
+            (
+                "720",
+                "480",
+                "25/1",
+                "99999999999",
+                "1:1",
+                "length of millennia",
+            ),
+            ("720", "480", "25/1", "10", "4000000:1", "stretched pixels"),
+            (
+                "16384",
+                "16384",
+                "25/1",
+                "10",
+                "1:1",
+                "over the pixel budget",
+            ),
+        ] {
+            assert!(parse_probe(&with(w, h, f, d, sar)).is_err(), "{why}");
+        }
+    }
 
     #[test]
     fn reads_a_dv_camcorder_file() {

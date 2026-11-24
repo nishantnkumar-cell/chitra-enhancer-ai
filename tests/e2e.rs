@@ -373,6 +373,88 @@ fn an_upscaler_and_a_denoiser_work_together() {
 }
 
 #[test]
+fn an_existing_video_result_is_not_replaced_without_force_and_dashed_names_are_safe() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    // A file name that starts with "-" must not be taken for an ffmpeg option.
+    let (i, o) = (d.path().join("-in.mp4"), d.path().join("-out.mp4"));
+    make_clip(&i);
+    let run = |extra: &[&str]| {
+        bin()
+            .current_dir(d.path())
+            .args(["-i", "./-in.mp4", "-o", "./-out.mp4", "--scale", "1"])
+            .args([
+                "--denoise",
+                "off",
+                "--codec",
+                "h264",
+                "--preset",
+                "ultrafast",
+            ])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let r = run(&[]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let before = std::fs::metadata(&o).unwrap().len();
+    let again = run(&[]);
+    assert!(!again.status.success());
+    assert!(String::from_utf8_lossy(&again.stderr).contains("--force"));
+    assert_eq!(
+        std::fs::metadata(&o).unwrap().len(),
+        before,
+        "left untouched"
+    );
+    assert!(run(&["--force"]).status.success());
+}
+
+#[test]
+fn an_enormous_enlargement_is_refused_up_front() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let (i, o) = (d.path().join("in.mp4"), d.path().join("out.mp4"));
+    // 4000x3000 enlarged 4x is 192 million pixels a frame.
+    let st = Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=gray:s=4000x3000:r=5:d=1",
+        ])
+        .args(["-c:v", "libx264", "-preset", "ultrafast"])
+        .arg(&i)
+        .status()
+        .unwrap();
+    assert!(st.success());
+    let r = bin()
+        .args([
+            "-i",
+            i.to_str().unwrap(),
+            "-o",
+            o.to_str().unwrap(),
+            "--scale",
+            "4",
+        ])
+        .output()
+        .unwrap();
+    assert!(!r.status.success());
+    assert!(
+        String::from_utf8_lossy(&r.stderr).contains("limit"),
+        "{}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    assert!(!o.exists());
+}
+
+#[test]
 fn the_models_command_lists_and_refuses_unknown_names_without_touching_the_network() {
     let d = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| {

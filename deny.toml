@@ -1,0 +1,52 @@
+# cargo-deny: run by CI on every push and pull request (and weekly).
+#   cargo install cargo-deny --locked && cargo deny check
+
+[graph]
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+]
+all-features = true
+
+[advisories]
+# A vulnerability, yanked or unsound crate fails the build; so does anything
+# unmaintained (add an `ignore` with a reason below if one cannot be avoided).
+yanked = "deny"
+unmaintained = "all"
+ignore = []
+
+[licenses]
+# This program is AGPL-3.0-or-later; everything it links must be compatible.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    "AGPL-3.0-only",
+    "AGPL-3.0-or-later",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+# No system TLS: downloads use rustls, and ONNX Runtime is never downloaded at
+# build time (`download-binaries` must stay off).
+deny = [
+    { name = "openssl" },
+    { name = "openssl-sys" },
+    { name = "native-tls" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -143,6 +143,12 @@ Video pipeline, resume, tiler, ONNX engine, grain, 1-4x scaling and photo mode
 Five-frame video denoising (FastDVDnet) and CI on Linux, Windows and macOS are in.
 The GUI works but has had only a smoke test (it starts and runs), no visual review yet.
 
+## Security
+
+See `SECURITY.md` for how to report a problem, what the program trusts and bounds
+(file sizes, downloads, models), and how dependencies are watched (cargo-deny in CI,
+Dependabot, pinned Actions).
+
 ## Licence
 
 AGPL-3.0-or-later (see `LICENSE`), the same as Chitra, because the JPEG XL

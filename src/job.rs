@@ -142,7 +142,7 @@ impl Settings {
         if self.output.is_file() && self.input.is_dir() {
             return Some("A folder needs a folder to save into, not a file.".into());
         }
-        if self.output.exists() && !self.overwrite && is_photo(&self.input) {
+        if self.output.is_file() && !self.overwrite && !self.input.is_dir() {
             return Some("The result file exists: tick \"Replace\" or pick another name.".into());
         }
         if self.five_frame && self.five_frame_model.is_none() {
@@ -205,9 +205,9 @@ impl Settings {
                 a.extend(["--model-compressed".into(), s(m)]);
             }
             a.extend(["--jxl-distance".into(), format!("{:.2}", self.jxl_distance)]);
-            if self.overwrite {
-                a.push("--force".into());
-            }
+        }
+        if self.overwrite && !folder {
+            a.push("--force".into());
         }
         if !is_photo(&self.input) {
             let denoise = if self.five_frame {
