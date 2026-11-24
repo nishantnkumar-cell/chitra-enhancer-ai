@@ -41,7 +41,11 @@ struct Args {
     /// from the video itself.
     #[arg(long)]
     temporal_sigma: Option<f32>,
-    /// Try the settings on just this many seconds from the middle of the video:
+    /// Measure the video's noise, print `NOISE <measured> <suggested>` and stop.
+    /// The suggested value is what the five-frame denoiser would use.
+    #[arg(long)]
+    measure_noise: bool,
+    /// Try the settings on 1 to 30 seconds from the middle of the video:
     /// writes the short clip to -o plus a before/after picture next to it.
     #[arg(long, value_name = "SECONDS")]
     preview: Option<f64>,
@@ -126,6 +130,9 @@ fn real_main() -> Result<()> {
     {
         bail!("--scale must be 1 to 4");
     }
+    if a.preview.is_some_and(|p| !(1.0..=30.0).contains(&p)) {
+        bail!("--preview must be 1 to 30 seconds");
+    }
     if a.temporal_sigma
         .is_some_and(|v| !(0.0..=100.0).contains(&v))
     {
@@ -183,28 +190,37 @@ fn real_main() -> Result<()> {
     if let Some(t) = a.scale {
         engine = Rescaled::wrap(engine, t);
     }
-    #[cfg_attr(not(feature = "onnx"), allow(unused_variables))]
-    let sigma = match a.temporal_sigma {
-        Some(v) => v,
-        None if a.temporal_model.is_some() || a.dry_run => {
-            match chitra_enhance::noise::estimate_video(&o, &info)? {
-                Some(v) => {
-                    // FastDVDnet does best when told the noise is somewhat
-                    // stronger than it is (tuned on three test clips: the best
-                    // setting was 1.5-2x the measured level).
-                    let used = (v * 1.6).clamp(3.0, 60.0);
-                    eprintln!(
-                        "Measured noise level: about {v:.0} (0-255 scale); using {used:.0} for the denoiser"
-                    );
-                    used
-                }
-                None => {
-                    eprintln!("Could not measure the noise level; using 15");
-                    15.0
-                }
-            }
+    let measured = if a.temporal_sigma.is_none()
+        && (a.measure_noise || a.temporal_model.is_some() || a.dry_run)
+    {
+        chitra_enhance::noise::estimate_video(&o, &info)?
+    } else {
+        None
+    };
+    // FastDVDnet does best when told the noise is somewhat stronger than it is
+    // (tuned on three test clips: the best setting was 1.5-2x the measured level).
+    let suggested = measured.map(|v| (v * 1.6).clamp(3.0, 60.0));
+    if a.measure_noise {
+        match (measured, suggested) {
+            (Some(m), Some(u)) => println!("NOISE {m:.1} {u:.0}"),
+            _ => println!("NOISE none"),
         }
-        None => 15.0,
+        return Ok(());
+    }
+    #[cfg_attr(not(feature = "onnx"), allow(unused_variables))]
+    let sigma = match (a.temporal_sigma, measured, suggested) {
+        (Some(v), ..) => v,
+        (None, Some(m), Some(u)) => {
+            eprintln!(
+                "Measured noise level: about {m:.0} (0-255 scale); using {u:.0} for the denoiser"
+            );
+            u
+        }
+        (None, ..) if a.temporal_model.is_some() || a.dry_run => {
+            eprintln!("Could not measure the noise level; using 15");
+            15.0
+        }
+        _ => 15.0,
     };
     let mut temporal: Option<Box<dyn chitra_enhance::temporal::Temporal>> = match &a.temporal_model
     {

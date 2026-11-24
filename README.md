@@ -36,6 +36,15 @@ and 33.1 dB with no denoising. At a cut between shots the window never reaches
 across: frames from the other shot are replaced by the nearest of the same one. At the start and end of each chunk
 the edge frame is repeated, which is invisible in practice.
 
+## You have the final say
+
+Everything the program chooses by itself can be set by hand, within sensible
+ranges: noise level (`--temporal-sigma 3..60`, or *Measure now* in the window to see
+the measurement and then adjust it), grain (`--grain 0..30`), deinterlacing
+(`--deinterlace`), tile size (`--tile-size`), video quality (`--crf`), chunk length
+(`--chunk-seconds`), output name, device and GPU memory. `--measure-noise` prints
+what it measured and suggests. Previews can be 1 to 30 seconds (`--preview`).
+
 ## Trying settings first
 
 `--preview 5` processes only 5 seconds from the middle of the video with your real

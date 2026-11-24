@@ -300,6 +300,46 @@ fn a_preview_makes_a_short_clip_and_a_before_after_picture_without_touching_real
 }
 
 #[test]
+fn noise_can_be_measured_and_previews_are_capped_at_30_seconds() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let (i, o) = (d.path().join("in.mp4"), d.path().join("out.mp4"));
+    make_clip(&i);
+    let r = bin()
+        .args([
+            "-i",
+            i.to_str().unwrap(),
+            "-o",
+            o.to_str().unwrap(),
+            "--measure-noise",
+        ])
+        .output()
+        .unwrap();
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let out = String::from_utf8_lossy(&r.stdout);
+    let (measured, suggested) = chitra_enhance::job::parse_noise(out.trim()).expect(&out);
+    assert!((0.0..40.0).contains(&measured), "{measured}");
+    let want = (measured * 1.6).clamp(3.0, 60.0);
+    assert!((suggested - want).abs() < 1.0, "{suggested} vs {want}");
+    assert!(!o.exists(), "measuring writes nothing");
+    let r = bin()
+        .args([
+            "-i",
+            i.to_str().unwrap(),
+            "-o",
+            o.to_str().unwrap(),
+            "--preview",
+            "31",
+        ])
+        .output()
+        .unwrap();
+    assert!(!r.status.success());
+    assert!(String::from_utf8_lossy(&r.stderr).contains("1 to 30"));
+}
+
+#[test]
 fn photo_mode_writes_16_bit_png_and_refuses_to_overwrite() {
     let d = tempfile::tempdir().unwrap();
     let i = d.path().join("p.png");
