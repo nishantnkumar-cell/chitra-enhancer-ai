@@ -100,7 +100,9 @@ impl App {
         }
         App {
             s,
-            ort: std::env::var("ORT_DYLIB_PATH").unwrap_or_default(),
+            ort: chitra_enhance::models::find_runtime()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
             log: vec![],
             progress: (0, 0),
             run: None,
@@ -128,6 +130,11 @@ impl App {
         self.is_preview = preview;
         self.preview_tex = None;
         self.preview_clip = preview.then(|| job::preview_output(&self.s.input));
+        self.spawn(ctx, args);
+    }
+
+    /// Runs the command-line program with `args`, showing its output in the log.
+    fn spawn(&mut self, ctx: &egui::Context, args: Vec<String>) {
         let mut cmd = Command::new(cli_path());
         cmd.args(&args)
             .stdout(Stdio::piped())
@@ -176,6 +183,22 @@ impl App {
             Err(e) => {
                 self.phase = Phase::Failed(format!("cannot start {}: {e}", cli_path().display()));
             }
+        }
+    }
+
+    /// Looks for the model files in the usual folder.
+    fn find_models(&mut self) {
+        if let Some(dir) = job::models_dir() {
+            self.s.model = self
+                .s
+                .model
+                .take()
+                .or_else(|| job::find_model(&dir, "realesr", true));
+            self.s.five_frame_model = self
+                .s
+                .five_frame_model
+                .take()
+                .or_else(|| job::find_model(&dir, "fastdvdnet", true));
         }
     }
 
@@ -248,6 +271,7 @@ impl App {
                 )
             };
             self.run = None;
+            self.find_models();
         }
     }
 }
@@ -317,6 +341,19 @@ impl eframe::App for App {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         ui.heading("Settings");
                         ui.add_space(6.0);
+                        if self.s.model.is_none() || self.s.five_frame_model.is_none() {
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .button("Download models")
+                                    .on_hover_text(
+                                        "The AI upscaler and the five-frame denoiser (about 20 MB), checked against known checksums",
+                                    )
+                                    .clicked()
+                                {
+                                    self.spawn(ctx, vec!["models".into(), "get".into(), "all".into()]);
+                                }
+                            });
+                        }
                         ui.horizontal(|ui| {
                             ui.label("Enlarge ×");
                             for n in 1..=4 {

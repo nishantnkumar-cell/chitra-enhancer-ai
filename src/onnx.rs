@@ -108,13 +108,7 @@ impl OnnxEngine {
         vram_mb: usize,
         tile: Option<usize>,
     ) -> Result<OnnxEngine> {
-        let lib = std::env::var_os("ORT_DYLIB_PATH").context(
-            "ONNX Runtime is not set up: set ORT_DYLIB_PATH to the ONNX Runtime library \
-             (libonnxruntime.so, onnxruntime.dll or libonnxruntime.dylib)",
-        )?;
-        let env = ort::init_from(lib)
-            .map_err(|e| anyhow!("cannot load ONNX Runtime: {e}"))?
-            .build()?;
+        let env = environment()?;
         let (session, provider) = build_session(&env, model, device)?;
         let input = session.inputs().first().context("the model has no input")?;
         let half = match input.dtype() {
@@ -243,10 +237,12 @@ impl Engine for OnnxEngine {
 }
 
 fn environment() -> Result<Environment> {
-    let lib = std::env::var_os("ORT_DYLIB_PATH").context(
-        "ONNX Runtime is not set up: set ORT_DYLIB_PATH to the ONNX Runtime library \
-         (libonnxruntime.so, onnxruntime.dll or libonnxruntime.dylib)",
-    )?;
+    let lib = crate::models::find_runtime().with_context(|| {
+        format!(
+            "ONNX Runtime is not set up.\n{}",
+            crate::models::RUNTIME_HELP
+        )
+    })?;
     Ok(ort::init_from(lib)
         .map_err(|e| anyhow!("cannot load ONNX Runtime: {e}"))?
         .build()?)

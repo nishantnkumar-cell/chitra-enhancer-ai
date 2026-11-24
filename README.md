@@ -92,17 +92,25 @@ Transparency is not kept.
   `--vram-budget` (GB) and steps down 512 -> 256 -> 128 if the GPU runs out of
   memory. Run tests with a model: `CHITRA_TEST_MODEL=x.onnx cargo test --features onnx`.
 
-## Getting a model
+## Getting the models
 
-`scripts/export_realesr_compact.py` turns the official Real-ESRGAN "compact"
-weights (BSD-3-Clause; `realesr-general-x4v3.pth` or `realesr-animevideov3.pth`
-from the xinntao/Real-ESRGAN releases) into FP32 and FP16 ONNX files; see the
-header of the script for the one `uv run` command. A 4x model can give a 2x
-result (`--scale 2`), which is usually sharper than a native 2x model.
-Weights are read with `weights_only=True` so a bad file cannot run code. Check
-the download's SHA-256 against the project's release notes first.
+`chitra-enhance models list` shows the models (an AI upscaler and the five-frame
+denoiser, FP16 for GPUs and FP32 for CPUs, about 20 MB in all);
+`chitra-enhance models get all` downloads them into the models folder
+(`~/.local/share/chitra-enhance/models`, `%LOCALAPPDATA%\chitra-enhance\models`
+on Windows). Each file is checked against a SHA-256 built into the program and
+deleted if it does not match; nothing downloads unless you ask. The window has a
+**Download models** button. The files are format conversions of Real-ESRGAN's
+"compact" model (BSD-3-Clause) and FastDVDnet (MIT); their licences are in
+`docs/MODEL_LICENCES.md`. `scripts/export_*.py` rebuild them from the original
+weights if you prefer to verify them yourself. On a CPU the FP32 file is faster;
+on a GPU use FP16. A 4x model can give a 2x result (`--scale 2`), usually sharper
+than a native 2x model.
 
-On a CPU the FP32 file is the faster one; on a GPU use FP16.
+ONNX Runtime itself is looked for automatically (next to the program, in
+`<data dir>/chitra-enhance/runtime`, and the usual system folders);
+`chitra-enhance models runtime` says what it found or how to install it, and
+`ORT_DYLIB_PATH` overrides the search.
 
 ## Status
 

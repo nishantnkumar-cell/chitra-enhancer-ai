@@ -340,6 +340,33 @@ fn noise_can_be_measured_and_previews_are_capped_at_30_seconds() {
 }
 
 #[test]
+fn the_models_command_lists_and_refuses_unknown_names_without_touching_the_network() {
+    let d = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        bin()
+            .arg("models")
+            .args(args)
+            // Keep the models folder inside the temp dir on every OS.
+            .env("XDG_DATA_HOME", d.path())
+            .env("LOCALAPPDATA", d.path())
+            .env("HOME", d.path())
+            .output()
+            .unwrap()
+    };
+    let r = run(&["list"]);
+    assert!(r.status.success());
+    let out = String::from_utf8_lossy(&r.stdout);
+    assert!(
+        out.contains("fastdvdnet_fp16.onnx") && out.contains("not installed"),
+        "{out}"
+    );
+    let r = run(&["get", "no-such-model"]);
+    assert!(!r.status.success());
+    assert!(String::from_utf8_lossy(&r.stderr).contains("no model matches"));
+    assert!(!run(&["frobnicate"]).status.success());
+}
+
+#[test]
 fn photo_mode_writes_16_bit_png_and_refuses_to_overwrite() {
     let d = tempfile::tempdir().unwrap();
     let i = d.path().join("p.png");
