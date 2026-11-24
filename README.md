@@ -32,8 +32,8 @@ samples across the video (8 frames, the quietest quarter of each) and scaled by
 `scripts/export_fastdvdnet.py` makes the ONNX files from its `model.pth`.
 On a test clip (natural picture panning, ffmpeg noise strength 25) the result
 scored 36.3 dB against the clean original, against 33.7 dB for `--denoise medium`
-and 33.1 dB with no denoising. A frame that changes completely (a cut) is
-cleaned from its own side only by the model; at the start and end of each chunk
+and 33.1 dB with no denoising. At a cut between shots the window never reaches
+across: frames from the other shot are replaced by the nearest of the same one. At the start and end of each chunk
 the edge frame is repeated, which is invisible in practice.
 
 ## Trying settings first

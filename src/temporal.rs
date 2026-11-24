@@ -22,10 +22,34 @@ pub trait Temporal {
     fn describe(&self) -> String;
 }
 
-/// A sliding window over a stream of frames.
+/// Two consecutive frames this far apart (mean absolute difference, 0..1) are
+/// different shots. Sensor noise is well below 0.05 and a fast pan below 0.12.
+const CUT: f32 = 0.2;
+
+/// Mean absolute difference between two pictures of the same size, from a
+/// sample of their pixels (every fourth in each direction).
+pub fn difference(a: &Plane, b: &Plane) -> f32 {
+    let (mut sum, mut n) = (0.0f64, 0u64);
+    for y in (0..a.h).step_by(4) {
+        for x in (0..a.w).step_by(4) {
+            let i = (y * a.w + x) * a.c;
+            for k in 0..a.c {
+                sum += (a.data[i + k] - b.data[i + k]).abs() as f64;
+                n += 1;
+            }
+        }
+    }
+    if n == 0 { 0.0 } else { (sum / n as f64) as f32 }
+}
+
+/// A sliding window over a stream of frames. A cut between shots ends the
+/// neighbourhood: frames from the other shot are replaced by the nearest frame
+/// of the same shot, so the denoiser never blends two scenes.
 #[derive(Default)]
 pub struct Window {
     frames: VecDeque<Plane>,
+    /// Shot number of each held frame.
+    shots: VecDeque<usize>,
     /// Index (in the whole stream) of the first frame still held.
     base: usize,
     total: usize,
@@ -38,7 +62,13 @@ impl Window {
     }
 
     pub fn push(&mut self, p: Plane) {
+        let shot = match (self.frames.back(), self.shots.back()) {
+            (Some(prev), Some(&sh)) if prev.w == p.w && difference(prev, &p) > CUT => sh + 1,
+            (_, Some(&sh)) => sh,
+            _ => 0,
+        };
         self.frames.push_back(p);
+        self.shots.push_back(shot);
         self.total += 1;
     }
 
@@ -48,8 +78,17 @@ impl Window {
         if self.centre >= self.total || (!last && self.centre + REACH >= self.total) {
             return None;
         }
+        let shot = self.shots[self.centre - self.base];
         let at = |d: usize| {
-            let want = (self.centre + d).saturating_sub(REACH).min(self.total - 1);
+            let mut want = (self.centre + d).saturating_sub(REACH).min(self.total - 1);
+            // Step back towards the centre until we are in the same shot.
+            while self.shots[want - self.base] != shot {
+                want = if want > self.centre {
+                    want - 1
+                } else {
+                    want + 1
+                };
+            }
             &self.frames[want - self.base]
         };
         Some([at(0), at(1), at(2), at(3), at(4)])
@@ -60,6 +99,7 @@ impl Window {
         self.centre += 1;
         while self.base + REACH < self.centre && self.frames.len() > 1 {
             self.frames.pop_front();
+            self.shots.pop_front();
             self.base += 1;
         }
     }
@@ -129,6 +169,35 @@ mod tests {
         assert_eq!(w[0], [at(0), at(0), at(0), at(1), at(2)]);
         assert_eq!(w[3], [at(1), at(2), at(3), at(4), at(5)]);
         assert_eq!(w[5], [at(3), at(4), at(5), at(5), at(5)]);
+    }
+
+    #[test]
+    fn a_cut_between_shots_is_never_blended_across() {
+        // Four frames of a dark shot (0.1), then four of a bright one (0.9).
+        let mut win = Window::new();
+        for v in [0.1, 0.1, 0.1, 0.1, 0.9, 0.9, 0.9, 0.9] {
+            win.push(frame(v));
+        }
+        let mut seen = Vec::new();
+        while let Some(w) = win.next(true) {
+            seen.push(w.map(|p| p.data[0]));
+            win.advance();
+        }
+        assert_eq!(seen.len(), 8);
+        for (i, w) in seen.iter().enumerate() {
+            let want = if i < 4 { 0.1 } else { 0.9 };
+            assert!(w.iter().all(|&v| v == want), "frame {i} saw {w:?}");
+        }
+    }
+
+    #[test]
+    fn noise_and_gentle_motion_are_not_cuts() {
+        let mut win = Window::new();
+        for i in 0..8 {
+            win.push(frame(0.4 + 0.02 * (i % 3) as f32 + 0.01 * i as f32));
+        }
+        let shots: Vec<usize> = win.shots.iter().copied().collect();
+        assert!(shots.iter().all(|&s| s == 0), "{shots:?}");
     }
 
     #[test]
