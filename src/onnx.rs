@@ -8,6 +8,7 @@
 //! down 512 -> 256 -> 128.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::ValueEnum;
@@ -59,7 +60,7 @@ impl Device {
 }
 
 pub struct OnnxEngine {
-    env: Environment,
+    env: Arc<Environment>,
     path: PathBuf,
     device: Device,
     session: Session,
@@ -236,22 +237,32 @@ impl Engine for OnnxEngine {
     }
 }
 
-fn environment() -> Result<Environment> {
+/// ONNX Runtime allows one environment per process, so every model shares it.
+fn environment() -> Result<Arc<Environment>> {
+    static ENV: Mutex<Option<Arc<Environment>>> = Mutex::new(None);
+    let mut slot = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(e) = slot.as_ref() {
+        return Ok(Arc::clone(e));
+    }
     let lib = crate::models::find_runtime().with_context(|| {
         format!(
             "ONNX Runtime is not set up.\n{}",
             crate::models::RUNTIME_HELP
         )
     })?;
-    Ok(ort::init_from(lib)
-        .map_err(|e| anyhow!("cannot load ONNX Runtime: {e}"))?
-        .build()?)
+    let env = Arc::new(
+        ort::init_from(lib)
+            .map_err(|e| anyhow!("cannot load ONNX Runtime: {e}"))?
+            .build()?,
+    );
+    *slot = Some(Arc::clone(&env));
+    Ok(env)
 }
 
 /// A five-frame video denoiser (FastDVDnet's interface): inputs `frames`
 /// [1,15,H,W] and `sigma` [1,1,H,W], output [1,3,H,W].
 pub struct OnnxDenoiser {
-    env: Environment,
+    env: Arc<Environment>,
     path: PathBuf,
     device: Device,
     session: Session,
@@ -366,4 +377,44 @@ impl Temporal for OnnxDenoiser {
     fn describe(&self) -> String {
         self.label.clone()
     }
+}
+
+/// Loads a model on the CPU and works out what it is, or says why it cannot be
+/// used. A denoiser is also run once on a small picture to confirm its output.
+pub fn inspect(path: &Path) -> Result<crate::models::ModelKind> {
+    use crate::models::ModelKind;
+    let env = environment()?;
+    let (session, _) = build_session(&env, path, Device::Cpu)?;
+    let names: Vec<String> = session
+        .inputs()
+        .iter()
+        .map(|i| i.name().to_string())
+        .collect();
+    drop(session);
+    drop(env);
+    if names == ["frames", "sigma"] {
+        let mut d = OnnxDenoiser::load(path, Device::Cpu, 2048, Some(64), 15.0)?;
+        let mut f = Plane::new(64, 48, 3);
+        f.data.fill(0.5);
+        let five = [&f, &f, &f, &f, &f];
+        let out = d.denoise(&five)?;
+        if (out.w, out.h, out.c) != (64, 48, 3) {
+            bail!(
+                "the five-frame model returned {}x{}x{} for a 64x48 picture",
+                out.w,
+                out.h,
+                out.c
+            );
+        }
+        return Ok(ModelKind::Denoiser5);
+    }
+    if names.len() != 1 {
+        bail!(
+            "unsupported model: it has {} inputs ({}); expected one image input, or `frames` + `sigma`",
+            names.len(),
+            names.join(", ")
+        );
+    }
+    let e = OnnxEngine::load(path, Device::Cpu, 2048, Some(64))?;
+    Ok(ModelKind::Upscaler { scale: e.scale() })
 }

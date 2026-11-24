@@ -339,6 +339,38 @@ fn noise_can_be_measured_and_previews_are_capped_at_30_seconds() {
     assert!(String::from_utf8_lossy(&r.stderr).contains("1 to 30"));
 }
 
+/// An upscaler and a five-frame denoiser in the same run (ONNX Runtime allows
+/// one environment per process, so they must share it). Needs ORT_DYLIB_PATH,
+/// CHITRA_TEST_MODEL and CHITRA_TEST_TEMPORAL_MODEL.
+#[cfg(feature = "onnx")]
+#[test]
+fn an_upscaler_and_a_denoiser_work_together() {
+    let (Some(_), Some(up), Some(dn)) = (
+        std::env::var_os("ORT_DYLIB_PATH"),
+        std::env::var_os("CHITRA_TEST_MODEL"),
+        std::env::var_os("CHITRA_TEST_TEMPORAL_MODEL"),
+    ) else {
+        eprintln!("models not configured: skipped");
+        return;
+    };
+    if !have_ffmpeg() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let (i, o) = (d.path().join("in.mp4"), d.path().join("out.mkv"));
+    make_clip(&i);
+    let r = bin()
+        .args(["-i", i.to_str().unwrap(), "-o", o.to_str().unwrap()])
+        .args(["--model", up.to_str().unwrap()])
+        .args(["--temporal-model", dn.to_str().unwrap()])
+        .args(["--device", "cpu", "--denoise", "off", "--grain", "0"])
+        .args(["--codec", "h264", "--preset", "ultrafast", "--scale", "2"])
+        .output()
+        .unwrap();
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    assert_eq!(frames(&o).0, "320,240,75");
+}
+
 #[test]
 fn the_models_command_lists_and_refuses_unknown_names_without_touching_the_network() {
     let d = tempfile::tempdir().unwrap();

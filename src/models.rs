@@ -128,6 +128,88 @@ pub fn select(names: &[String]) -> Result<Vec<&'static Model>> {
     Ok(out)
 }
 
+/// What a model file turned out to be.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ModelKind {
+    /// One frame in, `scale` times larger out (scale 1: a restorer such as a
+    /// denoiser or JPEG-artifact remover).
+    Upscaler { scale: usize },
+    /// Five frames plus a noise map in, the cleaned middle frame out.
+    Denoiser5,
+}
+
+impl ModelKind {
+    pub fn describe(self) -> String {
+        match self {
+            ModelKind::Upscaler { scale: 1 } => "single-frame restorer (same size)".into(),
+            ModelKind::Upscaler { scale } => format!("upscaler {scale}x"),
+            ModelKind::Denoiser5 => "five-frame video denoiser".into(),
+        }
+    }
+}
+
+/// A file name that is safe to create in the models folder: letters, digits,
+/// `-`, `_`, `.`; ends in `.onnx`.
+pub fn library_name(wanted: &str) -> Result<String> {
+    let stem = wanted.strip_suffix(".onnx").unwrap_or(wanted);
+    if stem.is_empty()
+        || stem.len() > 80
+        || stem.starts_with('.')
+        || !stem
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        bail!("\"{wanted}\" is not a usable model name (letters, digits, - _ . only, up to 80)");
+    }
+    let name = format!("{stem}.onnx");
+    if MODELS.iter().any(|m| m.file == name) {
+        bail!("{name} is the name of a built-in model; choose another");
+    }
+    Ok(name)
+}
+
+/// Copies a checked model into the library under `name`. Refuses to replace an
+/// existing file unless `force`.
+pub fn add_to_library(dir: &Path, src: &Path, name: &str, force: bool) -> Result<PathBuf> {
+    let name = library_name(name)?;
+    std::fs::create_dir_all(dir)?;
+    let dest = dir.join(&name);
+    if dest.exists() && !force {
+        bail!(
+            "{} already exists; use --force to replace it",
+            dest.display()
+        );
+    }
+    let part = dir.join(format!("{name}.part"));
+    std::fs::copy(src, &part).with_context(|| format!("cannot copy {}", src.display()))?;
+    std::fs::rename(&part, &dest)?;
+    Ok(dest)
+}
+
+/// Removes a model you added. The built-in ones are not removed this way.
+pub fn remove_custom(dir: &Path, name: &str) -> Result<PathBuf> {
+    let name = library_name(name)?;
+    let p = dir.join(&name);
+    if !p.is_file() {
+        bail!("{name} is not in the library");
+    }
+    std::fs::remove_file(&p)?;
+    Ok(p)
+}
+
+/// Every `.onnx` in the folder: the built-in ones that are installed and the
+/// ones you added, sorted by name.
+pub fn library(dir: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "onnx") && p.is_file())
+        .collect();
+    v.sort();
+    v
+}
+
 /// Where ONNX Runtime usually lives. `ORT_DYLIB_PATH` always wins; this is the
 /// fallback so most people never have to set it.
 pub fn find_runtime() -> Option<PathBuf> {
@@ -226,6 +308,43 @@ mod tests {
         assert!(!is_installed(d.path(), m));
         std::fs::write(d.path().join(m.file), vec![0u8; m.bytes as usize]).unwrap();
         assert!(!is_installed(d.path(), m), "right size, wrong content");
+    }
+
+    #[test]
+    fn library_names_are_safe_and_never_shadow_built_in_models() {
+        assert_eq!(library_name("my-model_v2").unwrap(), "my-model_v2.onnx");
+        assert_eq!(library_name("x.onnx").unwrap(), "x.onnx");
+        for bad in [
+            "",
+            ".hidden",
+            "../evil",
+            "a/b",
+            "a b",
+            "ü",
+            "fastdvdnet_fp16",
+        ] {
+            assert!(library_name(bad).is_err(), "{bad:?}");
+        }
+        assert!(library_name(&"a".repeat(81)).is_err());
+    }
+
+    #[test]
+    fn adding_copies_refuses_to_replace_and_removing_only_touches_the_library() {
+        let d = tempfile::tempdir().unwrap();
+        let (lib, src) = (d.path().join("lib"), d.path().join("mine.onnx"));
+        std::fs::write(&src, b"model bytes").unwrap();
+        let p = add_to_library(&lib, &src, "mine", false).unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"model bytes");
+        assert!(add_to_library(&lib, &src, "mine", false).is_err());
+        std::fs::write(&src, b"newer").unwrap();
+        add_to_library(&lib, &src, "mine", true).unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"newer");
+        assert_eq!(library(&lib), vec![p.clone()]);
+        assert!(remove_custom(&lib, "nope").is_err());
+        assert!(remove_custom(&lib, "../mine").is_err());
+        remove_custom(&lib, "mine").unwrap();
+        assert!(library(&lib).is_empty());
+        assert!(src.is_file(), "the original is never touched");
     }
 
     #[test]

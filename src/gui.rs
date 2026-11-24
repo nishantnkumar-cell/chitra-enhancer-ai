@@ -49,6 +49,8 @@ struct App {
     /// (measured, suggested) noise level of the chosen video.
     measured: Option<(f32, f32)>,
     measure_note: String,
+    /// Every .onnx in the models folder.
+    library: Vec<PathBuf>,
 }
 
 fn cli_path() -> PathBuf {
@@ -72,21 +74,32 @@ fn pick_file(title: &str, exts: &[&str]) -> Option<PathBuf> {
     d.pick_file()
 }
 
-fn path_row(ui: &mut egui::Ui, label: &str, value: &mut Option<PathBuf>, exts: &[&str]) {
+/// A model choice: pick from the library, or any other .onnx file.
+fn model_row(ui: &mut egui::Ui, label: &str, value: &mut Option<PathBuf>, library: &[PathBuf]) {
     ui.horizontal(|ui| {
         ui.label(label);
         let shown = value
             .as_deref()
             .and_then(Path::file_name)
             .map_or("none".to_string(), |n| n.to_string_lossy().into_owned());
-        ui.label(RichText::new(shown).monospace());
-        if ui.button("Choose…").clicked()
-            && let Some(p) = pick_file(label, exts)
+        egui::ComboBox::from_id_salt(label)
+            .selected_text(shown)
+            .width(170.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(value, None, "none");
+                for p in library {
+                    let name = p
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned();
+                    ui.selectable_value(value, Some(p.clone()), name);
+                }
+            });
+        if ui.small_button("Other file…").clicked()
+            && let Some(p) = pick_file(label, &["onnx"])
         {
             *value = Some(p);
-        }
-        if value.is_some() && ui.small_button("✕").clicked() {
-            *value = None;
         }
     });
 }
@@ -115,6 +128,9 @@ impl App {
             measure_rx: None,
             measured: None,
             measure_note: String::new(),
+            library: job::models_dir()
+                .map(|d| chitra_enhance::models::library(&d))
+                .unwrap_or_default(),
         }
     }
 
@@ -272,6 +288,9 @@ impl App {
             };
             self.run = None;
             self.find_models();
+            if let Some(d) = job::models_dir() {
+                self.library = chitra_enhance::models::library(&d);
+            }
         }
     }
 }
@@ -341,6 +360,19 @@ impl eframe::App for App {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         ui.heading("Settings");
                         ui.add_space(6.0);
+                        if ui
+                            .button("Add your own model…")
+                            .on_hover_text(
+                                "An ONNX model: it is checked, then kept in your models folder",
+                            )
+                            .clicked()
+                            && let Some(p) = pick_file("Choose an ONNX model", &["onnx"])
+                        {
+                            self.spawn(
+                                ctx,
+                                vec!["models".into(), "add".into(), p.display().to_string()],
+                            );
+                        }
                         if self.s.model.is_none() || self.s.five_frame_model.is_none() {
                             ui.horizontal(|ui| {
                                 if ui
@@ -360,13 +392,13 @@ impl eframe::App for App {
                                 ui.selectable_value(&mut self.s.scale, n, n.to_string());
                             }
                         });
-                        path_row(ui, "AI upscaler", &mut self.s.model, &["onnx"]);
+                        model_row(ui, "AI upscaler", &mut self.s.model, &self.library);
                         if photo {
-                            path_row(
+                            model_row(
                                 ui,
                                 "For compressed JPEGs",
                                 &mut self.s.model_compressed,
-                                &["onnx"],
+                                &self.library,
                             );
                             ui.add(
                                 egui::Slider::new(&mut self.s.jxl_distance, 0.1..=3.0)
@@ -380,11 +412,11 @@ impl eframe::App for App {
                                 "Five-frame AI denoising (best for camcorder noise)",
                             );
                             if self.s.five_frame {
-                                path_row(
+                                model_row(
                                     ui,
                                     "Denoise model",
                                     &mut self.s.five_frame_model,
-                                    &["onnx"],
+                                    &self.library,
                                 );
                                 let mut auto = self.s.sigma.is_none();
                                 ui.horizontal(|ui| {

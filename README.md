@@ -117,6 +117,20 @@ weights if you prefer to verify them yourself. On a CPU the FP32 file is faster;
 on a GPU use FP16. A 4x model can give a 2x result (`--scale 2`), usually sharper
 than a native 2x model.
 
+### Your own models
+
+`chitra-enhance models add my-model.onnx [name]` loads the file, works out what it
+is and, if it works, keeps a copy in the models folder (`models remove <name>`
+deletes it again; `--force` replaces one). Two kinds are accepted: **single-image
+models** (RGB 0..1, NCHW; any scale from 1x up, so denoisers, JPEG-artifact
+removers and upscalers all fit) and **five-frame video denoisers** with inputs
+`frames` [1,15,H,W] and `sigma` [1,1,H,W] like the one made by
+`scripts/export_fastdvdnet.py`. Anything else is refused with the reason. The
+window has *Add your own model…* and lists everything in the folder in its model
+menus. Only add models from sources you trust: a model is a program for the
+inference engine, and ONNX Runtime, not this program, is what runs it. Check the
+licence of a model before sharing results or the file itself.
+
 ONNX Runtime itself is looked for automatically (next to the program, in
 `<data dir>/chitra-enhance/runtime`, and the usual system folders);
 `chitra-enhance models runtime` says what it found or how to install it, and
