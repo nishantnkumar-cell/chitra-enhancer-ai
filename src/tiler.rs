@@ -111,12 +111,28 @@ pub fn upscale_tiled<F>(
     scale: usize,
     tile: usize,
     overlap: usize,
+    model: F,
+) -> Result<Plane>
+where
+    F: FnMut(&Plane) -> Result<Plane>,
+{
+    map_tiled(src, scale, src.c, tile, overlap, model)
+}
+
+/// Like `upscale_tiled`, but the model may return a different number of
+/// channels than it was given (`out_c`), e.g. five stacked frames in, one out.
+pub fn map_tiled<F>(
+    src: &Plane,
+    scale: usize,
+    out_c: usize,
+    tile: usize,
+    overlap: usize,
     mut model: F,
 ) -> Result<Plane>
 where
     F: FnMut(&Plane) -> Result<Plane>,
 {
-    if scale == 0 || tile < 16 || overlap * 2 >= tile {
+    if scale == 0 || out_c == 0 || tile < 16 || overlap * 2 >= tile {
         bail!("bad tiling: scale {scale}, tile {tile}, overlap {overlap}");
     }
     let padded = pad_reflect(src, 16);
@@ -125,7 +141,7 @@ where
     let xs = starts(pw, tw, overlap);
     let ys = starts(ph, th, overlap);
     let (ow, oh) = (pw * scale, ph * scale);
-    let mut acc = vec![0.0f32; ow * oh * c];
+    let mut acc = vec![0.0f32; ow * oh * out_c];
     let mut wsum = vec![0.0f32; ow * oh];
     let ramp = overlap * scale;
 
@@ -137,9 +153,10 @@ where
                 t.data[y * tw * c..(y + 1) * tw * c].copy_from_slice(&padded.data[s..s + tw * c]);
             }
             let out = model(&t)?;
-            if (out.w, out.h, out.c) != (tw * scale, th * scale, c) {
+            if (out.w, out.h, out.c) != (tw * scale, th * scale, out_c) {
                 bail!(
-                    "the model returned {}x{}x{} for a {tw}x{th}x{c} tile at scale {scale}",
+                    "the model returned {}x{}x{} for a {tw}x{th}x{c} tile at scale {scale} \
+                     (expected {out_c} channels)",
                     out.w,
                     out.h,
                     out.c
@@ -153,9 +170,9 @@ where
                     let wgt = wy * weight(x, out.w, ramp, left, right);
                     let (gx, gy) = (x0 * scale + x, y0 * scale + y);
                     let g = gy * ow + gx;
-                    let src_px = &out.data[(y * out.w + x) * c..(y * out.w + x + 1) * c];
-                    for k in 0..c {
-                        acc[g * c + k] += src_px[k] * wgt;
+                    let px = &out.data[(y * out.w + x) * out_c..(y * out.w + x + 1) * out_c];
+                    for k in 0..out_c {
+                        acc[g * out_c + k] += px[k] * wgt;
                     }
                     wsum[g] += wgt;
                 }
@@ -165,13 +182,13 @@ where
 
     // Normalise and crop away the padding.
     let (fw, fh) = (src.w * scale, src.h * scale);
-    let mut result = Plane::new(fw, fh, c);
+    let mut result = Plane::new(fw, fh, out_c);
     for y in 0..fh {
         for x in 0..fw {
             let g = y * ow + x;
             let inv = 1.0 / wsum[g];
-            for k in 0..c {
-                result.data[(y * fw + x) * c + k] = acc[g * c + k] * inv;
+            for k in 0..out_c {
+                result.data[(y * fw + x) * out_c + k] = acc[g * out_c + k] * inv;
             }
         }
     }
@@ -238,6 +255,29 @@ mod tests {
                 for x in 0..w {
                     assert_eq!(q.at(x, y), p.at(x, y));
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn a_model_may_take_five_frames_and_return_one() {
+        // 15 channels in; the model keeps the middle frame (channels 6..9).
+        let mut src = Plane::new(50, 37, 15);
+        for (i, v) in src.data.iter_mut().enumerate() {
+            *v = ((i * 7) % 101) as f32 / 101.0;
+        }
+        let out = map_tiled(&src, 1, 3, 32, 8, |t| {
+            let mut o = Plane::new(t.w, t.h, 3);
+            for i in 0..t.w * t.h {
+                o.data[i * 3..i * 3 + 3].copy_from_slice(&t.data[i * 15 + 6..i * 15 + 9]);
+            }
+            Ok(o)
+        })
+        .unwrap();
+        assert_eq!((out.w, out.h, out.c), (50, 37, 3));
+        for i in 0..50 * 37 {
+            for k in 0..3 {
+                assert!((out.data[i * 3 + k] - src.data[i * 15 + 6 + k]).abs() < 1e-5);
             }
         }
     }

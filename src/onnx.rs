@@ -21,7 +21,8 @@ use crate::engine::Engine;
 use crate::infer::{
     from_chw, overlap_for, plane_from_rgb8, rgb8_from_plane, smaller_tile, tile_for_budget, to_chw,
 };
-use crate::tiler::{Plane, upscale_tiled};
+use crate::temporal::{FRAMES, Temporal, stack};
+use crate::tiler::{Plane, map_tiled, upscale_tiled};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Device {
@@ -238,5 +239,135 @@ impl Engine for OnnxEngine {
 
     fn process_plane(&mut self, src: &Plane) -> Result<Plane> {
         self.upscale_plane(src)
+    }
+}
+
+fn environment() -> Result<Environment> {
+    let lib = std::env::var_os("ORT_DYLIB_PATH").context(
+        "ONNX Runtime is not set up: set ORT_DYLIB_PATH to the ONNX Runtime library \
+         (libonnxruntime.so, onnxruntime.dll or libonnxruntime.dylib)",
+    )?;
+    Ok(ort::init_from(lib)
+        .map_err(|e| anyhow!("cannot load ONNX Runtime: {e}"))?
+        .build()?)
+}
+
+/// A five-frame video denoiser (FastDVDnet's interface): inputs `frames`
+/// [1,15,H,W] and `sigma` [1,1,H,W], output [1,3,H,W].
+pub struct OnnxDenoiser {
+    env: Environment,
+    path: PathBuf,
+    device: Device,
+    session: Session,
+    half: bool,
+    tile: usize,
+    sigma: f32,
+    label: String,
+}
+
+impl OnnxDenoiser {
+    /// `sigma` is the noise level on a 0..255 scale (about 5 = faint, 20 = clearly
+    /// noisy, 40 = very noisy).
+    pub fn load(
+        model: &Path,
+        device: Device,
+        vram_mb: usize,
+        tile: Option<usize>,
+        sigma: f32,
+    ) -> Result<OnnxDenoiser> {
+        let env = environment()?;
+        let (session, provider) = build_session(&env, model, device)?;
+        let names: Vec<&str> = session.inputs().iter().map(|i| i.name()).collect();
+        if names != ["frames", "sigma"] {
+            bail!(
+                "{} is not a five-frame denoiser: it has inputs {names:?}, expected [\"frames\", \"sigma\"]",
+                model.display()
+            );
+        }
+        let half = matches!(
+            session.inputs()[0].dtype(),
+            ValueType::Tensor {
+                ty: TensorElementType::Float16,
+                ..
+            }
+        );
+        // Five frames in and two U-Net stages: roughly 4x the memory of an upscaler tile.
+        let tile = tile.map_or_else(
+            || tile_for_budget(vram_mb / 3, 1, if half { 2 } else { 4 }),
+            |t| t.clamp(64, 1024),
+        );
+        Ok(OnnxDenoiser {
+            env,
+            path: model.to_path_buf(),
+            device,
+            session,
+            half,
+            tile,
+            sigma,
+            label: format!(
+                "{} on {} ({}, sigma {sigma}, tiles up to {tile})",
+                model.file_name().unwrap_or_default().to_string_lossy(),
+                provider,
+                if half { "FP16" } else { "FP32" },
+            ),
+        })
+    }
+
+    fn run_tile(&mut self, t: &Plane) -> Result<Plane> {
+        let (w, h) = (t.w as i64, t.h as i64);
+        let chw = to_chw(t);
+        let sig = vec![self.sigma / 255.0; t.w * t.h];
+        let (fs, ss) = ([1i64, (3 * FRAMES) as i64, h, w], [1i64, 1, h, w]);
+        let flat: Vec<f32> = if self.half {
+            let f: Vec<f16> = chw.iter().map(|&v| f16::from_f32(v)).collect();
+            let n: Vec<f16> = sig.iter().map(|&v| f16::from_f32(v)).collect();
+            let outs = self.session.run(ort::inputs![
+                "frames" => Tensor::from_array((fs, f))?,
+                "sigma" => Tensor::from_array((ss, n))?
+            ])?;
+            let (_, d) = outs[0].try_extract_tensor::<f16>()?;
+            d.iter().map(|v| v.to_f32()).collect()
+        } else {
+            let outs = self.session.run(ort::inputs![
+                "frames" => Tensor::from_array((fs, chw))?,
+                "sigma" => Tensor::from_array((ss, sig))?
+            ])?;
+            let (_, d) = outs[0].try_extract_tensor::<f32>()?;
+            d.to_vec()
+        };
+        Ok(from_chw(&flat, t.w, t.h, 3))
+    }
+}
+
+impl Temporal for OnnxDenoiser {
+    fn denoise(&mut self, w: &[&Plane; FRAMES]) -> Result<Plane> {
+        let stacked = stack(w);
+        loop {
+            let tile = self.tile;
+            let mut oom = false;
+            let r = map_tiled(&stacked, 1, 3, tile, overlap_for(tile), |t| {
+                self.run_tile(t).inspect_err(|e| {
+                    oom = e.downcast_ref::<ort::Error>().is_some_and(is_out_of_memory);
+                })
+            });
+            match r {
+                Ok(p) => return Ok(p),
+                Err(e) if oom => {
+                    let next = smaller_tile(tile)
+                        .ok_or_else(|| e.context("out of GPU memory even with 128-pixel tiles"))?;
+                    eprintln!(
+                        "\nOut of GPU memory: reloading the denoiser with {next}-pixel tiles"
+                    );
+                    let (s, _) = build_session(&self.env, &self.path, self.device)?;
+                    self.session = s;
+                    self.tile = next;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    fn describe(&self) -> String {
+        self.label.clone()
     }
 }

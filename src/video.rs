@@ -21,6 +21,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::Engine;
 use crate::ffmpeg::{Tools, VideoInfo};
+use crate::infer::{plane_from_rgb8, rgb8_from_plane};
+use crate::temporal::{Temporal, Window};
 
 /// Set by Ctrl-C (or in tests): the chunk in progress is dropped and the run ends.
 pub static STOP: AtomicBool = AtomicBool::new(false);
@@ -246,9 +248,14 @@ impl Options {
     }
 
     /// Everything that must be the same for chunks of two runs to belong together.
-    fn settings_key(&self, info: &VideoInfo, engine: &dyn Engine) -> String {
+    fn settings_key(
+        &self,
+        info: &VideoInfo,
+        engine: &dyn Engine,
+        temporal: Option<&dyn Temporal>,
+    ) -> String {
         format!(
-            "v1|{}|{:?}|{:?}|{}|{:?}|{:?}|{:?}|{}|{}|{}",
+            "v2|{}|{:?}|{:?}|{}|{:?}|{:?}|{:?}|{}|{}|{}|{}",
             self.input.display(),
             self.denoise,
             self.deinterlace,
@@ -258,6 +265,7 @@ impl Options {
             self.preset,
             self.chunk_secs,
             self.grain,
+            temporal.map_or("none".to_string(), |t| t.describe()),
             format_args!("{} {}x{}", engine.describe(), info.width, info.height),
         )
     }
@@ -309,6 +317,7 @@ fn run_chunk(
     o: &Options,
     info: &VideoInfo,
     engine: &mut dyn Engine,
+    mut temporal: Option<&mut (dyn Temporal + 'static)>,
     start: f64,
     dur: f64,
     part: &Path,
@@ -359,7 +368,8 @@ fn run_chunk(
     let mut sink = enc.stdin.take().context("no encoder input")?;
     let mut frame = vec![0u8; w * h * 3];
     let mut frames = 0u64;
-    loop {
+    let mut win = Window::new();
+    'frames: loop {
         if STOP.load(Ordering::Relaxed) {
             kill(&mut [&mut dec, &mut enc]);
             let _ = std::fs::remove_file(part);
@@ -369,27 +379,51 @@ fn run_chunk(
             }
             .into());
         }
-        match read_frame(&mut out, &mut frame) {
-            Ok(true) => {}
-            Ok(false) => break,
-            Err(e) => {
-                kill(&mut [&mut dec, &mut enc]);
-                return Err(e);
-            }
-        }
-        let better = match engine.process(&frame, w, h) {
-            Ok(b) => b,
+        let got = match read_frame(&mut out, &mut frame) {
+            Ok(g) => g,
             Err(e) => {
                 kill(&mut [&mut dec, &mut enc]);
                 return Err(e);
             }
         };
-        if sink.write_all(&better).is_err() {
-            // The encoder died: its own message is on screen.
+        // Frames ready to be enlarged. With a temporal denoiser they trail the
+        // decoder by a couple of frames and the last ones come out at the end.
+        let mut ready: Vec<Vec<u8>> = Vec::new();
+        if let Some(t) = temporal.as_deref_mut() {
+            if got {
+                win.push(plane_from_rgb8(&frame, w, h));
+            }
+            while let Some(around) = win.next(!got) {
+                match t.denoise(&around) {
+                    Ok(p) => ready.push(rgb8_from_plane(&p)),
+                    Err(e) => {
+                        kill(&mut [&mut dec, &mut enc]);
+                        return Err(e);
+                    }
+                }
+                win.advance();
+            }
+        } else if got {
+            ready.push(frame.clone());
+        }
+        for clean in &ready {
+            let better = match engine.process(clean, w, h) {
+                Ok(b) => b,
+                Err(e) => {
+                    kill(&mut [&mut dec, &mut enc]);
+                    return Err(e);
+                }
+            };
+            if sink.write_all(&better).is_err() {
+                // The encoder died: its own message is on screen.
+                break 'frames;
+            }
+            frames += 1;
+            bar.inc(1);
+        }
+        if !got {
             break;
         }
-        frames += 1;
-        bar.inc(1);
     }
     drop(sink);
     let d = dec.wait()?;
@@ -444,7 +478,12 @@ fn assemble(o: &Options, info: &VideoInfo, work: &Path, chunks: usize) -> Result
 }
 
 /// Restores `o.input` into `o.output` with `engine`, resuming an unfinished run.
-pub fn run(o: &Options, engine: &mut dyn Engine, info: &VideoInfo) -> Result<Summary> {
+pub fn run(
+    o: &Options,
+    engine: &mut dyn Engine,
+    mut temporal: Option<&mut (dyn Temporal + 'static)>,
+    info: &VideoInfo,
+) -> Result<Summary> {
     let started = Instant::now();
     if o.chunk_secs < 1.0 {
         bail!("--chunk-seconds must be at least 1");
@@ -455,7 +494,7 @@ pub fn run(o: &Options, engine: &mut dyn Engine, info: &VideoInfo) -> Result<Sum
     let chunks = ((info.duration / o.chunk_secs).ceil() as usize).max(1);
     let work = work_dir(&o.output);
     let (size, mtime) = file_stamp(&o.input)?;
-    let settings = o.settings_key(info, engine);
+    let settings = o.settings_key(info, engine, temporal.as_deref());
 
     if o.restart && work.exists() {
         std::fs::remove_dir_all(&work)?;
@@ -526,7 +565,16 @@ pub fn run(o: &Options, engine: &mut dyn Engine, info: &VideoInfo) -> Result<Sum
         let dur = (info.duration - start).min(o.chunk_secs);
         bar.set_message(format!("chunk {}/{chunks}", i + 1));
         let part = work.join(format!("chunk_{i:05}.part.mkv"));
-        match run_chunk(o, info, engine, start, dur, &part, &bar) {
+        match run_chunk(
+            o,
+            info,
+            engine,
+            temporal.as_deref_mut(),
+            start,
+            dur,
+            &part,
+            &bar,
+        ) {
             Ok(n) => frames += n,
             Err(e) if e.downcast_ref::<Stopped>().is_some() => {
                 bar.abandon();

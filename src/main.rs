@@ -30,6 +30,16 @@ struct Args {
     /// is used. Needs ORT_DYLIB_PATH and a build with `--features onnx`.
     #[arg(long)]
     model: Option<PathBuf>,
+    /// A five-frame video denoising ONNX model (FastDVDnet; see
+    /// scripts/export_fastdvdnet.py). It looks at neighbouring frames, so it
+    /// removes camcorder noise far better than the single-frame `--denoise`
+    /// filter; with it, consider `--denoise off`. Video only.
+    #[arg(long)]
+    temporal_model: Option<PathBuf>,
+    /// Noise level for --temporal-model on a 0..255 scale: 5 faint, 20 clearly
+    /// noisy, 40 very noisy. Too high smooths real detail.
+    #[arg(long, default_value_t = 20.0)]
+    temporal_sigma: f32,
     /// Which processor runs the model.
     #[cfg(feature = "onnx")]
     #[arg(long, value_enum, default_value_t = chitra_enhance::onnx::Device::Auto)]
@@ -108,6 +118,9 @@ fn real_main() -> Result<()> {
     {
         bail!("--scale must be 1 to 4");
     }
+    if !(0.0..=100.0).contains(&a.temporal_sigma) {
+        bail!("--temporal-sigma must be 0 to 100");
+    }
     if a.grain.is_some_and(|g| g > 30) {
         bail!("--grain must be 0 to 30");
     }
@@ -159,13 +172,32 @@ fn real_main() -> Result<()> {
     if let Some(t) = a.scale {
         engine = Rescaled::wrap(engine, t);
     }
+    let mut temporal: Option<Box<dyn chitra_enhance::temporal::Temporal>> = match &a.temporal_model
+    {
+        #[cfg(feature = "onnx")]
+        Some(m) => Some(Box::new(chitra_enhance::onnx::OnnxDenoiser::load(
+            m,
+            a.device,
+            a.vram_budget * 1024,
+            a.tile_size,
+            a.temporal_sigma,
+        )?)),
+        #[cfg(not(feature = "onnx"))]
+        Some(_) => bail!(
+            "this build has no AI model support: rebuild with `cargo build --release --features onnx`"
+        ),
+        None => None,
+    };
     eprintln!("Filters: {}", o.decode_filters(&info));
+    if let Some(t) = &temporal {
+        eprintln!("Temporal denoiser: {}", t.describe());
+    }
     eprintln!("Engine: {}", engine.describe());
     if a.dry_run {
         return Ok(());
     }
     ctrlc::set_handler(|| video::STOP.store(true, Ordering::Relaxed))?;
-    let s = video::run(&o, engine.as_mut(), &info)?;
+    let s = video::run(&o, engine.as_mut(), temporal.as_deref_mut(), &info)?;
     eprintln!(
         "Done: {} frames in {} chunks ({} resumed) in {:.0} s -> {}",
         s.frames,

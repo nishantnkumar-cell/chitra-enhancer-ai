@@ -7,5 +7,6 @@ pub mod inspector;
 #[cfg(feature = "onnx")]
 pub mod onnx;
 pub mod photo;
+pub mod temporal;
 pub mod tiler;
 pub mod video;
