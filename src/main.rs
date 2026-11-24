@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use anyhow::{Result, bail};
 use clap::Parser;
 
-use chitra_enhance::engine::{Engine, Lanczos};
+use chitra_enhance::engine::{Engine, Lanczos, Rescaled};
 use chitra_enhance::ffmpeg::{self, Tools};
 use chitra_enhance::video::{self, Codec, Deinterlace, Denoise, Options, Stopped};
 
@@ -18,9 +18,14 @@ struct Args {
     /// Where to write the result (never the input). .mp4, .mkv or .mov.
     #[arg(short, long)]
     output: PathBuf,
-    /// How many times larger the picture becomes (without --model).
-    #[arg(long, default_value_t = 2)]
-    scale: usize,
+    /// How many times larger the picture becomes. Default: the model's own
+    /// scale, or 2 without a model. A different number resizes the model's result.
+    #[arg(long)]
+    scale: Option<usize>,
+    /// Film grain to put back after cleaning (0 = none, 3 = fine, 8 = strong).
+    /// Fully clean video can look plastic. Default 3 when denoising, else 0.
+    #[arg(long)]
+    grain: Option<u32>,
     /// An ONNX upscaling model (FP16 or FP32, RGB in 0..1, NCHW). Its own scale
     /// is used. Needs ORT_DYLIB_PATH and a build with `--features onnx`.
     #[arg(long)]
@@ -84,8 +89,13 @@ fn real_main() -> Result<()> {
     if a.output.exists() && !a.restart && a.output == a.input {
         bail!("the output must not be the input");
     }
-    if !(1..=4).contains(&a.scale) {
+    if let Some(s) = a.scale
+        && !(1..=4).contains(&s)
+    {
         bail!("--scale must be 1 to 4");
+    }
+    if a.grain.is_some_and(|g| g > 30) {
+        bail!("--grain must be 0 to 30");
     }
     let tools = Tools::locate(a.ffmpeg.as_deref())?;
     let info = ffmpeg::probe(&tools, &a.input)?;
@@ -115,6 +125,9 @@ fn real_main() -> Result<()> {
         chunk_secs: a.chunk_seconds,
         restart: a.restart,
         keep_work: a.keep_work,
+        grain: a
+            .grain
+            .unwrap_or(if a.denoise == Denoise::Off { 0 } else { 3 }),
         stop_after_chunks: a.stop_after_chunks,
     };
     let mut engine: Box<dyn Engine> = match &a.model {
@@ -128,8 +141,11 @@ fn real_main() -> Result<()> {
         Some(_) => bail!(
             "this build has no AI model support: rebuild with `cargo build --release --features onnx`"
         ),
-        None => Box::new(Lanczos::new(a.scale)),
+        None => Box::new(Lanczos::new(a.scale.unwrap_or(2))),
     };
+    if let Some(t) = a.scale {
+        engine = Rescaled::wrap(engine, t);
+    }
     eprintln!("Filters: {}", o.decode_filters(&info));
     eprintln!("Engine: {}", engine.describe());
     if a.dry_run {

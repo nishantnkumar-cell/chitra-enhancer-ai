@@ -97,6 +97,8 @@ pub struct Options {
     /// Ignore and delete an unfinished earlier run.
     pub restart: bool,
     pub keep_work: bool,
+    /// Film grain strength put back before encoding (0 = none).
+    pub grain: u32,
     /// For tests: stop (as if by Ctrl-C) after this many chunks of this run.
     pub stop_after_chunks: Option<usize>,
 }
@@ -189,6 +191,14 @@ impl Options {
         f.join(",")
     }
 
+    /// ffmpeg arguments that add fine temporal grain to the finished frames.
+    fn grain_filter(&self) -> Vec<String> {
+        if self.grain == 0 {
+            return Vec::new();
+        }
+        vec!["-vf".into(), format!("noise=alls={}:allf=t+u", self.grain)]
+    }
+
     fn codec_args(&self) -> Vec<String> {
         let s = |v: &str| v.to_string();
         match self.codec {
@@ -238,7 +248,7 @@ impl Options {
     /// Everything that must be the same for chunks of two runs to belong together.
     fn settings_key(&self, info: &VideoInfo, engine: &dyn Engine) -> String {
         format!(
-            "v1|{}|{:?}|{:?}|{}|{:?}|{:?}|{:?}|{}|{}",
+            "v1|{}|{:?}|{:?}|{}|{:?}|{:?}|{:?}|{}|{}|{}",
             self.input.display(),
             self.denoise,
             self.deinterlace,
@@ -247,6 +257,7 @@ impl Options {
             self.crf,
             self.preset,
             self.chunk_secs,
+            self.grain,
             format_args!("{} {}x{}", engine.describe(), info.width, info.height),
         )
     }
@@ -335,6 +346,7 @@ fn run_chunk(
             "-i",
             "-",
         ])
+        .args(o.grain_filter())
         .args(o.codec_args())
         .args(["-an", "-f", "matroska"])
         .arg(part)
@@ -571,6 +583,7 @@ mod tests {
             chunk_secs: 20.0,
             restart: false,
             keep_work: false,
+            grain: 0,
             stop_after_chunks: None,
         }
     }
@@ -597,6 +610,14 @@ mod tests {
             "bwdif=mode=send_frame:parity=auto:deint=all,hqdn3d=4:3:8:6,\
              scale=640:480:flags=lanczos,setsar=1,format=rgb24"
         );
+    }
+
+    #[test]
+    fn grain_is_added_only_when_asked() {
+        let mut o = opts();
+        assert!(o.grain_filter().is_empty());
+        o.grain = 4;
+        assert_eq!(o.grain_filter(), ["-vf", "noise=alls=4:allf=t+u"]);
     }
 
     #[test]
