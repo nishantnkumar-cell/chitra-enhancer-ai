@@ -155,8 +155,8 @@ fn refuses_the_input_as_output_and_a_missing_file() {
     assert!(!r.status.success());
 }
 
-/// Runs a real ONNX model when `ORT_DYLIB_PATH` and `CHITRA_TEST_MODEL` (a 2x
-/// model) are set and the binary was built with `--features onnx`.
+/// Runs a real ONNX model when `ORT_DYLIB_PATH` and `CHITRA_TEST_MODEL` (any
+/// scale) are set and the binary was built with `--features onnx`.
 #[cfg(feature = "onnx")]
 #[test]
 fn an_onnx_model_doubles_the_frame_size() {
@@ -176,6 +176,7 @@ fn an_onnx_model_doubles_the_frame_size() {
     let r = bin()
         .args(["-i", i.to_str().unwrap(), "-o", o.to_str().unwrap()])
         .args(["--model", model.to_str().unwrap(), "--device", "cpu"])
+        .args(["--scale", "2"])
         .args([
             "--codec",
             "h264",
