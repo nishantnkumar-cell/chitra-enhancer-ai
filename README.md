@@ -26,7 +26,9 @@ settings or input are refused unless you add `--restart`.
 model each frame together with the two before and two after it, so noise that
 changes from frame to frame is averaged out and the picture that stays put is
 kept. `--temporal-sigma` is the noise level on a 0-255 scale (5 faint, 15-20 clearly
-noisy, 40 very noisy); too high softens detail. The model is FastDVDnet (MIT);
+noisy, 40 very noisy); too high softens detail. Left out, it is **measured** from
+samples across the video (8 frames, the quietest quarter of each) and scaled by
+1.6, which tuned best on three test clips of known noise. The model is FastDVDnet (MIT);
 `scripts/export_fastdvdnet.py` makes the ONNX files from its `model.pth`.
 On a test clip (natural picture panning, ffmpeg noise strength 25) the result
 scored 36.3 dB against the clean original, against 33.7 dB for `--denoise medium`

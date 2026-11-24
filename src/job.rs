@@ -15,8 +15,8 @@ pub struct Settings {
     pub model_compressed: Option<PathBuf>,
     pub five_frame: bool,
     pub five_frame_model: Option<PathBuf>,
-    /// 0..=100, noise level for the five-frame model.
-    pub sigma: f32,
+    /// Noise level (0..=100) for the five-frame model; None = measure it.
+    pub sigma: Option<f32>,
     /// "off", "light", "medium", "strong" (used when five_frame is off).
     pub denoise: String,
     /// "auto", "on", "off"
@@ -39,7 +39,7 @@ impl Default for Settings {
             model_compressed: None,
             five_frame: false,
             five_frame_model: None,
-            sigma: 15.0,
+            sigma: None,
             denoise: "medium".into(),
             deinterlace: "auto".into(),
             codec: "h265".into(),
@@ -129,7 +129,9 @@ impl Settings {
                 && let Some(m) = &self.five_frame_model
             {
                 a.extend(["--temporal-model".into(), s(m)]);
-                a.extend(["--temporal-sigma".into(), format!("{:.0}", self.sigma)]);
+                if let Some(v) = self.sigma {
+                    a.extend(["--temporal-sigma".into(), format!("{v:.0}")]);
+                }
             }
             a.extend(["--deinterlace".into(), self.deinterlace.clone()]);
             a.extend(["--codec".into(), self.codec.clone()]);
@@ -243,7 +245,7 @@ mod tests {
         let mut s = video();
         s.five_frame = true;
         s.five_frame_model = Some("/m/fastdvdnet_fp16.onnx".into());
-        s.sigma = 18.0;
+        s.sigma = Some(18.0);
         s.grain = Some(4);
         let a = s.args();
         let at = |f: &str| a.iter().position(|x| x == f).map(|i| a[i + 1].as_str());
@@ -251,6 +253,11 @@ mod tests {
         assert_eq!(at("--temporal-model"), Some("/m/fastdvdnet_fp16.onnx"));
         assert_eq!(at("--temporal-sigma"), Some("18"));
         assert_eq!(at("--grain"), Some("4"));
+        s.sigma = None;
+        assert!(
+            !s.args().contains(&"--temporal-sigma".to_string()),
+            "auto means no flag"
+        );
     }
 
     #[test]

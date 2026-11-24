@@ -164,6 +164,11 @@ impl Options {
         ((w & !1) as usize, (h & !1) as usize)
     }
 
+    /// `frame_size` as (width, height) numbers.
+    pub fn frame_dims(&self, info: &VideoInfo) -> (usize, usize) {
+        Self::frame_size(info)
+    }
+
     /// The frame rate of the result.
     fn out_fps(&self, info: &VideoInfo) -> (u32, u32) {
         let mul = if self.interlaced(info) && self.double_rate {

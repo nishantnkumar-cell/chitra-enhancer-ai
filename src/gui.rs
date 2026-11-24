@@ -262,10 +262,19 @@ impl eframe::App for App {
                                     &mut self.s.five_frame_model,
                                     &["onnx"],
                                 );
-                                ui.add(
-                                    egui::Slider::new(&mut self.s.sigma, 0.0..=60.0)
-                                        .text("Noise level"),
-                                );
+                                let mut auto = self.s.sigma.is_none();
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(&mut auto, "Measure noise level");
+                                    if !auto {
+                                        let v = self.s.sigma.get_or_insert(15.0);
+                                        ui.add(egui::Slider::new(v, 0.0..=60.0));
+                                    }
+                                });
+                                if auto {
+                                    self.s.sigma = None;
+                                } else if self.s.sigma.is_none() {
+                                    self.s.sigma = Some(15.0);
+                                }
                             } else {
                                 egui::ComboBox::from_label("Simple denoise")
                                     .selected_text(self.s.denoise.clone())
