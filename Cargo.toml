@@ -10,6 +10,7 @@ edition = "2024"
 anyhow = "1.0.105"
 clap = { version = "4.6.9", features = ["derive"] }
 ctrlc = "3.5.3"
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"], optional = true }
 fast_image_resize = "6.2.0"
 half = { version = "2.7.1", optional = true }
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "bmp", "webp", "tiff"] }
@@ -17,6 +18,7 @@ indicatif = "0.18.6"
 jxl-encoder = { version = "0.3.1", default-features = false, features = ["std", "parallel"] }
 ort = { version = "2.0.0-rc.15", default-features = false, features = ["load-dynamic", "ndarray", "half", "cuda", "directml", "coreml"], optional = true }
 png = "0.18.1"
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"], optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 
@@ -28,8 +30,18 @@ tempfile = "3.27.0"
 # the program builds and runs without the ONNX Runtime library; the plain
 # Lanczos upscaler is used then.
 onnx = ["dep:ort", "dep:half"]
+gui = ["dep:eframe", "dep:rfd"]
 
 [profile.release]
 opt-level = 3
 lto = "thin"
 strip = true
+
+[[bin]]
+name = "chitra-enhance"
+path = "src/main.rs"
+
+[[bin]]
+name = "chitra-enhance-gui"
+path = "src/gui.rs"
+required-features = ["gui"]

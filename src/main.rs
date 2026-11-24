@@ -40,6 +40,9 @@ struct Args {
     /// noisy, 40 very noisy. Too high smooths real detail.
     #[arg(long, default_value_t = 20.0)]
     temporal_sigma: f32,
+    /// Print `PROGRESS done total` lines on stdout (used by the GUI).
+    #[arg(long, hide = true)]
+    progress: bool,
     /// Which processor runs the model.
     #[cfg(feature = "onnx")]
     #[arg(long, value_enum, default_value_t = chitra_enhance::onnx::Device::Auto)]
@@ -124,6 +127,7 @@ fn real_main() -> Result<()> {
     if a.grain.is_some_and(|g| g > 30) {
         bail!("--grain must be 0 to 30");
     }
+    video::REPORT_PROGRESS.store(a.progress, Ordering::Relaxed);
     if is_photo(&a.input) {
         return photo_mode(&a);
     }
