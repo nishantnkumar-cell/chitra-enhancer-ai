@@ -77,7 +77,7 @@ fn build_session(env: &Environment, path: &Path, device: Device) -> Result<(Sess
             let mut b = Session::builder(env)?
                 .with_execution_providers([p.error_on_failure()])
                 .map_err(|e| -> ort::Error { e.into() })?;
-            b.commit_from_file(path).map_err(Into::into)
+            b.commit_from_file(path)
         })();
         match built {
             Ok(s) => return Ok((s, name.to_string())),
