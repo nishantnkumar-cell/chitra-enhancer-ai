@@ -53,8 +53,16 @@ what it measured and suggests. Previews can be 1 to 30 seconds (`--preview`).
 nothing, and suggests settings with the reasons: whether it is interlaced, how much
 noise there really is, whether to use the AI upscaler or five-frame denoiser, and
 the matching command line. It also reports what it can see but not yet correct
-(black edges, a colour cast, blown-out whites). The window has **Analyse and
+(a possible colour cast, blown-out whites). The window has **Analyse and
 suggest settings**, which fills the settings in; every one can still be changed.
+
+### Black edges and colour casts
+
+`--crop L:R:T:B` cuts black edges (even numbers; the analysis suggests them).
+`--colour-shift BLUE:RED` (-40 to 40) takes that much from the two colour channels
+to remove a cast; the analysis reports what it sees but does not apply it, because
+a sky also counts as "whitish". Try it with `--preview`, which also says how long
+the whole video would take.
 
 ## DVDs
 

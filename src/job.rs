@@ -39,6 +39,10 @@ pub struct Settings {
     pub double_rate: bool,
     /// DVD only: a title number or "all"; None = the longest title.
     pub title: Option<String>,
+    /// Pixels cut from left, right, top, bottom.
+    pub crop: Option<[u32; 4]>,
+    /// Colour-cast correction (blue, red).
+    pub colour_shift: Option<(i32, i32)>,
 }
 
 impl Default for Settings {
@@ -66,6 +70,8 @@ impl Default for Settings {
             chunk_secs: None,
             double_rate: false,
             title: None,
+            crop: None,
+            colour_shift: None,
         }
     }
 }
@@ -187,6 +193,7 @@ impl Settings {
         self.double_rate = s.double_rate;
         self.grain = Some(s.grain);
         self.crf = Some(s.crf);
+        self.crop = s.crop;
     }
 
     /// Arguments that analyse the input and print suggestions.
@@ -293,6 +300,12 @@ impl Settings {
             }
             if self.double_rate {
                 a.push("--double-rate".into());
+            }
+            if let Some([l, r, t, b]) = self.crop {
+                a.extend(["--crop".into(), format!("{l}:{r}:{t}:{b}")]);
+            }
+            if let Some((u, v)) = self.colour_shift {
+                a.extend(["--colour-shift".into(), format!("{u}:{v}")]);
             }
             if let Some(g) = self.grain {
                 a.extend(["--grain".into(), g.to_string()]);
@@ -590,6 +603,7 @@ mod tests {
             ai_upscaler: true,
             grain: 0,
             crf: 18,
+            crop: Some([10, 6, 0, 0]),
         };
         s.apply(&sug, Some("/m/up.onnx".into()), Some("/m/dn.onnx".into()));
         let a = s.args();
@@ -598,6 +612,9 @@ mod tests {
         assert_eq!(at(&a, "--denoise").as_deref(), Some("light"));
         assert_eq!(at(&a, "--grain").as_deref(), Some("0"));
         assert_eq!(at(&a, "--crf").as_deref(), Some("18"));
+        assert_eq!(at(&a, "--crop").as_deref(), Some("10:6:0:0"));
+        s.colour_shift = Some((-4, 2));
+        assert_eq!(at(&s.args(), "--colour-shift").as_deref(), Some("-4:2"));
         assert!(a.contains(&"--double-rate".to_string()));
         assert!(!a.contains(&"--temporal-model".to_string()));
         assert_eq!(parse_title("TITLE 2 3600"), Some((2, 3600.0)));

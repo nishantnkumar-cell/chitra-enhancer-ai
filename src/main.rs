@@ -14,6 +14,30 @@ fn any_path(s: &str) -> Result<PathBuf, std::convert::Infallible> {
     Ok(PathBuf::from(s))
 }
 
+#[derive(Clone, Copy, Debug)]
+struct Edges([u32; 4]);
+#[derive(Clone, Copy, Debug)]
+struct Shift(i32, i32);
+
+fn parse_crop(s: &str) -> Result<Edges, String> {
+    let v: Vec<u32> = s
+        .split(':')
+        .map(|x| x.parse().map_err(|_| format!("\"{x}\" is not a number")))
+        .collect::<Result<_, _>>()?;
+    <[u32; 4]>::try_from(v)
+        .map(Edges)
+        .map_err(|_| "give four numbers, left:right:top:bottom".into())
+}
+
+fn parse_shift(s: &str) -> Result<Shift, String> {
+    let (a, b) = s.split_once(':').ok_or("give two numbers, blue:red")?;
+    let n = |x: &str| {
+        x.parse::<i32>()
+            .map_err(|_| format!("\"{x}\" is not a number"))
+    };
+    Ok(Shift(n(a)?, n(b)?))
+}
+
 /// Restore and enlarge old, noisy video (camcorder, tape) on your own computer.
 #[derive(Parser, Debug, Clone)]
 #[command(version, about)]
@@ -29,6 +53,14 @@ struct Args {
     /// Look at a few places in the video and suggest settings, changing nothing.
     #[arg(long)]
     analyze: bool,
+    /// Cut black edges: pixels from the left, right, top and bottom (even
+    /// numbers), for example 10:6:0:0. --analyze suggests values.
+    #[arg(long, value_name = "L:R:T:B", value_parser = parse_crop)]
+    crop: Option<Edges>,
+    /// Remove a colour cast: amounts (-40..40) taken from the blue and red
+    /// colour channels, for example 6:2. --analyze reports what it sees.
+    #[arg(long, value_name = "BLUE:RED", value_parser = parse_shift, allow_hyphen_values = true)]
+    colour_shift: Option<Shift>,
     /// DVD only: show the titles on the disc.
     #[arg(long)]
     list_titles: bool,
@@ -656,7 +688,10 @@ fn run_one(mut a: Args) -> Result<()> {
             .grain
             .unwrap_or(if a.denoise == Denoise::Off { 0 } else { 3 }),
         stop_after_chunks: a.stop_after_chunks,
+        crop: a.crop.map(|c| c.0),
+        colour_shift: a.colour_shift.map(|s| (s.0, s.1)),
     };
+    o.check_picture(&info)?;
     let mut engine: Box<dyn Engine> = match &a.model {
         #[cfg(feature = "onnx")]
         Some(m) => load_model(m, a.device, a.vram_budget, a.tile_size)?,
@@ -735,10 +770,13 @@ fn run_one(mut a: Args) -> Result<()> {
             );
         }
         let p = video::preview(&o, engine.as_mut(), temporal.as_deref_mut(), &info, secs)?;
+        let mins = p.whole.as_secs().div_ceil(60);
         eprintln!(
-            "Preview clip: {}\nBefore/after picture: {}",
+            "Preview clip: {}\nBefore/after picture: {}\nThe whole video would take about {} h {:02} min at this speed.",
             p.clip.display(),
-            p.compare.display()
+            p.compare.display(),
+            mins / 60,
+            mins % 60
         );
         return Ok(());
     }
