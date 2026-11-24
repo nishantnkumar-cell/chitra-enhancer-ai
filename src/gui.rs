@@ -44,6 +44,11 @@ struct App {
     is_preview: bool,
     preview_clip: Option<PathBuf>,
     preview_tex: Option<egui::TextureHandle>,
+    /// Waiting for a noise measurement from the command-line program.
+    measure_rx: Option<Receiver<Option<(f32, f32)>>>,
+    /// (measured, suggested) noise level of the chosen video.
+    measured: Option<(f32, f32)>,
+    measure_note: String,
 }
 
 fn cli_path() -> PathBuf {
@@ -105,23 +110,24 @@ impl App {
             is_preview: false,
             preview_clip: None,
             preview_tex: None,
+            measure_rx: None,
+            measured: None,
+            measure_note: String::new(),
         }
     }
 
     fn start(&mut self, ctx: &egui::Context, preview: bool) {
-        let mut s = self.s.clone();
-        if preview {
-            s.output = job::preview_output(&s.input);
-        }
-        let mut args = s.args();
-        if preview {
-            args.extend(["--preview".into(), "5".into(), "--force".into()]);
-        } else if self.restart {
+        let mut args = if preview {
+            self.s.preview_args()
+        } else {
+            self.s.args()
+        };
+        if !preview && self.restart {
             args.push("--restart".into());
         }
         self.is_preview = preview;
         self.preview_tex = None;
-        self.preview_clip = preview.then(|| s.output.clone());
+        self.preview_clip = preview.then(|| job::preview_output(&self.s.input));
         let mut cmd = Command::new(cli_path());
         cmd.args(&args)
             .stdout(Stdio::piped())
@@ -171,6 +177,31 @@ impl App {
                 self.phase = Phase::Failed(format!("cannot start {}: {e}", cli_path().display()));
             }
         }
+    }
+
+    /// Asks the command-line program to measure the noise of the chosen video.
+    fn measure(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = channel();
+        let args = self.s.measure_args();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let mut cmd = Command::new(cli_path());
+            cmd.args(args).stdin(Stdio::null()).stderr(Stdio::null());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x0800_0000);
+            }
+            let found = cmd.output().ok().and_then(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .find_map(job::parse_noise)
+            });
+            let _ = tx.send(found);
+            ctx.request_repaint();
+        });
+        self.measure_rx = Some(rx);
+        self.measure_note = "measuring…".into();
     }
 
     fn stop(&mut self) {
@@ -263,6 +294,19 @@ impl eframe::App for App {
             }
             self.is_preview = false;
         }
+        if let Some(rx) = &self.measure_rx
+            && let Ok(r) = rx.try_recv()
+        {
+            self.measure_rx = None;
+            self.measured = r;
+            self.measure_note = match r {
+                Some((m, u)) => format!("measured about {m:.0}, suggested {u:.0}"),
+                None => "could not measure this video".into(),
+            };
+            if let (Some((_, u)), Some(_)) = (r, self.s.sigma) {
+                self.s.sigma = Some(u); // already tweaking by hand: start from the suggestion
+            }
+        }
         let running = self.phase == Phase::Running;
         let photo = job::is_photo(&self.s.input);
 
@@ -307,17 +351,32 @@ impl eframe::App for App {
                                 );
                                 let mut auto = self.s.sigma.is_none();
                                 ui.horizontal(|ui| {
-                                    ui.checkbox(&mut auto, "Measure noise level");
-                                    if !auto {
-                                        let v = self.s.sigma.get_or_insert(15.0);
-                                        ui.add(egui::Slider::new(v, 0.0..=60.0));
-                                    }
+                                    ui.checkbox(&mut auto, "Measure noise level automatically");
                                 });
                                 if auto {
                                     self.s.sigma = None;
                                 } else if self.s.sigma.is_none() {
-                                    self.s.sigma = Some(15.0);
+                                    self.s.sigma = Some(self.measured.map_or(15.0, |(_, u)| u));
                                 }
+                                if let Some(v) = &mut self.s.sigma {
+                                    ui.add(
+                                        egui::Slider::new(v, 3.0..=60.0)
+                                            .text("Noise level")
+                                            .suffix(" (5 faint · 20 noisy · 40 very)"),
+                                    );
+                                }
+                                ui.horizontal(|ui| {
+                                    let can = !self.s.input.as_os_str().is_empty()
+                                        && self.measure_rx.is_none();
+                                    if ui
+                                        .add_enabled(can, egui::Button::new("Measure now"))
+                                        .on_hover_text("Look at frames across the video")
+                                        .clicked()
+                                    {
+                                        self.measure(ctx);
+                                    }
+                                    ui.label(RichText::new(&self.measure_note).weak());
+                                });
                             } else {
                                 egui::ComboBox::from_label("Simple denoise")
                                     .selected_text(self.s.denoise.clone())
@@ -351,6 +410,34 @@ impl eframe::App for App {
                                 }
                             });
                             self.s.grain = on.then(|| g.unwrap_or(3.0) as u32);
+                            ui.collapsing("Advanced", |ui| {
+                                let mut crf = self.s.crf;
+                                ui.horizontal(|ui| {
+                                    let mut on = crf.is_some();
+                                    ui.checkbox(&mut on, "Video quality");
+                                    if on {
+                                        let v = crf.get_or_insert(20);
+                                        ui.add(
+                                            egui::Slider::new(v, 10..=35).text("lower = better"),
+                                        );
+                                    }
+                                    self.s.crf = on.then(|| crf.unwrap_or(20));
+                                });
+                                let mut chunk = self.s.chunk_secs;
+                                ui.horizontal(|ui| {
+                                    let mut on = chunk.is_some();
+                                    ui.checkbox(&mut on, "Save progress every");
+                                    if on {
+                                        let v = chunk.get_or_insert(30);
+                                        ui.add(egui::Slider::new(v, 10..=120).suffix(" s"));
+                                    }
+                                    self.s.chunk_secs = on.then(|| chunk.unwrap_or(30));
+                                });
+                                ui.checkbox(
+                                    &mut self.s.double_rate,
+                                    "Interlaced: keep both fields (smoother, 2× frames)",
+                                );
+                            });
                             ui.checkbox(&mut self.restart, "Start over (ignore unfinished work)");
                         }
                         ui.separator();
@@ -438,13 +525,20 @@ impl eframe::App for App {
                     if b.clicked() {
                         self.start(ctx, false);
                     }
-                    if !photo
-                        && ui
-                            .add_enabled(problem.is_none(), egui::Button::new("Preview 5 s"))
-                            .on_hover_text("Try these settings on 5 seconds from the middle")
+                    if !photo {
+                        let label = format!("Preview {} s", self.s.preview_secs);
+                        if ui
+                            .add_enabled(problem.is_none(), egui::Button::new(label))
+                            .on_hover_text("Try these settings on a few seconds from the middle")
                             .clicked()
-                    {
-                        self.start(ctx, true);
+                        {
+                            self.start(ctx, true);
+                        }
+                        ui.add(
+                            egui::Slider::new(&mut self.s.preview_secs, 1..=30)
+                                .suffix(" s")
+                                .show_value(false),
+                        );
                     }
                     if let Some(p) = &problem
                         && !self.s.input.as_os_str().is_empty()

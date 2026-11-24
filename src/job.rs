@@ -27,6 +27,16 @@ pub struct Settings {
     pub vram_gb: usize,
     pub jxl_distance: f32,
     pub overwrite: bool,
+    /// 1..=30 seconds tried by a preview.
+    pub preview_secs: u32,
+    /// Video quality, lower is better; None = the codec's default.
+    pub crf: Option<u32>,
+    /// Largest tile in pixels (128, 256, 512); None = chosen from the GPU memory.
+    pub tile: Option<usize>,
+    /// Seconds per resumable chunk; None = 30.
+    pub chunk_secs: Option<u32>,
+    /// Keep both fields of interlaced video (twice the frames).
+    pub double_rate: bool,
 }
 
 impl Default for Settings {
@@ -48,6 +58,11 @@ impl Default for Settings {
             vram_gb: 8,
             jxl_distance: 1.0,
             overwrite: false,
+            preview_secs: 5,
+            crf: None,
+            tile: None,
+            chunk_secs: None,
+            double_rate: false,
         }
     }
 }
@@ -100,6 +115,33 @@ impl Settings {
         None
     }
 
+    /// Arguments for a preview: the same settings on `preview_secs` seconds,
+    /// written to the preview name so a finished result is never touched.
+    pub fn preview_args(&self) -> Vec<String> {
+        let mut s = self.clone();
+        s.output = preview_output(&s.input);
+        let mut a = s.args();
+        a.extend([
+            "--preview".into(),
+            self.preview_secs.clamp(1, 30).to_string(),
+            "--force".into(),
+        ]);
+        a
+    }
+
+    /// Arguments that only measure the noise (see `parse_noise`).
+    pub fn measure_args(&self) -> Vec<String> {
+        vec![
+            "-i".into(),
+            self.input.to_string_lossy().into_owned(),
+            "-o".into(),
+            preview_output(&self.input).to_string_lossy().into_owned(),
+            "--deinterlace".into(),
+            self.deinterlace.clone(),
+            "--measure-noise".into(),
+        ]
+    }
+
     /// Arguments for `chitra-enhance` (without the program name).
     pub fn args(&self) -> Vec<String> {
         let s = |p: &Path| p.to_string_lossy().into_owned();
@@ -117,6 +159,9 @@ impl Settings {
         }
         a.extend(["--device".into(), self.device.clone()]);
         a.extend(["--vram-budget".into(), self.vram_gb.to_string()]);
+        if let Some(t) = self.tile {
+            a.extend(["--tile-size".into(), t.to_string()]);
+        }
         if is_photo(&self.input) {
             if let Some(m) = &self.model_compressed {
                 a.extend(["--model-compressed".into(), s(m)]);
@@ -142,6 +187,15 @@ impl Settings {
             }
             a.extend(["--deinterlace".into(), self.deinterlace.clone()]);
             a.extend(["--codec".into(), self.codec.clone()]);
+            if let Some(c) = self.crf {
+                a.extend(["--crf".into(), c.to_string()]);
+            }
+            if let Some(c) = self.chunk_secs {
+                a.extend(["--chunk-seconds".into(), c.to_string()]);
+            }
+            if self.double_rate {
+                a.push("--double-rate".into());
+            }
             if let Some(g) = self.grain {
                 a.extend(["--grain".into(), g.to_string()]);
             }
@@ -156,6 +210,12 @@ pub fn parse_progress(line: &str) -> Option<(u64, u64)> {
     let done = it.next()?.parse().ok()?;
     let total = it.next()?.parse().ok()?;
     Some((done, total))
+}
+
+/// `NOISE 8.2 13` -> (measured 8.2, suggested 13); `NOISE none` -> None.
+pub fn parse_noise(line: &str) -> Option<(f32, f32)> {
+    let mut it = line.strip_prefix("NOISE ")?.split_whitespace();
+    Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
 }
 
 /// Where the models are usually kept: `<data dir>/chitra-enhance/models`.
@@ -317,6 +377,56 @@ mod tests {
         assert_eq!(parse_progress("PROGRESS 120 900"), Some((120, 900)));
         assert_eq!(parse_progress("PROGRESS x 9"), None);
         assert_eq!(parse_progress("Done: 5 frames"), None);
+    }
+
+    #[test]
+    fn every_automatic_choice_can_be_overridden_within_reason() {
+        let mut s = video();
+        s.crf = Some(18);
+        s.tile = Some(256);
+        s.chunk_secs = Some(60);
+        s.double_rate = true;
+        let a = s.args();
+        let at = |f: &str| a.iter().position(|x| x == f).map(|i| a[i + 1].as_str());
+        assert_eq!(at("--crf"), Some("18"));
+        assert_eq!(at("--tile-size"), Some("256"));
+        assert_eq!(at("--chunk-seconds"), Some("60"));
+        assert!(a.contains(&"--double-rate".to_string()));
+        // Left automatic, none of them is passed.
+        let plain = video().args();
+        for f in [
+            "--crf",
+            "--tile-size",
+            "--chunk-seconds",
+            "--double-rate",
+            "--temporal-sigma",
+        ] {
+            assert!(!plain.contains(&f.to_string()), "{f}");
+        }
+    }
+
+    #[test]
+    fn previews_are_capped_at_30_seconds_and_never_use_the_real_output() {
+        let mut s = video();
+        s.preview_secs = 500;
+        let a = s.preview_args();
+        let at = |f: &str| a.iter().position(|x| x == f).map(|i| a[i + 1].as_str());
+        assert_eq!(at("--preview"), Some("30"));
+        assert_eq!(
+            Path::new(at("-o").unwrap()),
+            Path::new("/v/old-preview.mp4"),
+            "compared as paths: Windows writes the separator differently"
+        );
+        assert!(a.contains(&"--force".to_string()));
+        s.preview_secs = 0;
+        assert!(s.preview_args().contains(&"1".to_string()));
+    }
+
+    #[test]
+    fn the_noise_line_is_read() {
+        assert_eq!(parse_noise("NOISE 8.2 13"), Some((8.2, 13.0)));
+        assert_eq!(parse_noise("NOISE none"), None);
+        assert_eq!(parse_noise("Done"), None);
     }
 
     #[test]
