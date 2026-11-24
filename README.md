@@ -29,7 +29,20 @@ settings or input are refused unless you add `--restart`.
   `--vram-budget` (GB) and steps down 512 -> 256 -> 128 if the GPU runs out of
   memory. Run tests with a model: `CHITRA_TEST_MODEL=x.onnx cargo test --features onnx`.
 
+## Getting a model
+
+`scripts/export_realesr_compact.py` turns the official Real-ESRGAN "compact"
+weights (BSD-3-Clause; `realesr-general-x4v3.pth` or `realesr-animevideov3.pth`
+from the xinntao/Real-ESRGAN releases) into FP32 and FP16 ONNX files; see the
+header of the script for the one `uv run` command. A 4x model can give a 2x
+result (`--scale 2`), which is usually sharper than a native 2x model.
+Weights are read with `weights_only=True` so a bad file cannot run code. Check
+the download's SHA-256 against the project's release notes first.
+
+On a CPU the FP32 file is the faster one; on a GPU use FP16.
+
 ## Status
 
-Video pipeline, resume, tiler and ONNX engine work. Not yet: photo mode
-(JPEG tiering, JXL output), video-aware denoise models, grain re-adding.
+Video pipeline, resume, tiler, ONNX engine, grain and 1-4x scaling work, tested
+with a real Real-ESRGAN model. Not yet: photo mode (JPEG tiering, JXL output),
+video-aware (multi-frame) denoise models.
