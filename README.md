@@ -100,6 +100,14 @@ batch continues where it stopped (a half-done video resumes inside its own work
 folder); `--force` redoes everything. One bad file is reported and the rest carry
 on; the exit status says if any failed. Ctrl-C stops the whole batch.
 
+## Install on Linux
+
+`scripts/install-linux.sh` builds the program and installs it for your user (no
+root): the two programs in `~/.local/bin` and a *Chitra Enhancer AI* menu entry
+that also opens videos, DVD images and photos. To uninstall, delete
+`~/.local/bin/chitra-enhance`, `~/.local/bin/chitra-enhance-gui` and
+`~/.local/share/applications/chitra-enhancer-ai.desktop`.
+
 ## The window (GUI)
 
 `cargo build --release --features gui,onnx` makes two programs, `chitra-enhance`
