@@ -164,6 +164,11 @@ impl Options {
         ((w & !1) as usize, (h & !1) as usize)
     }
 
+    /// `frame_size` as (width, height) numbers.
+    pub fn frame_dims(&self, info: &VideoInfo) -> (usize, usize) {
+        Self::frame_size(info)
+    }
+
     /// The frame rate of the result.
     fn out_fps(&self, info: &VideoInfo) -> (u32, u32) {
         let mul = if self.interlaced(info) && self.double_rate {
@@ -485,6 +490,87 @@ fn assemble(o: &Options, info: &VideoInfo, work: &Path, chunks: usize) -> Result
         bail!("ffmpeg could not join the chunks ({status})");
     }
     Ok(())
+}
+
+/// What `preview` made.
+pub struct Preview {
+    pub clip: PathBuf,
+    /// A still: the original on the left, the result on the right.
+    pub compare: PathBuf,
+}
+
+/// Processes only `secs` seconds from the middle of the video, with the real
+/// settings, so they can be judged in seconds instead of hours. The clip has
+/// no audio and nothing is resumable; the still compares one frame.
+pub fn preview(
+    o: &Options,
+    engine: &mut dyn Engine,
+    temporal: Option<&mut (dyn Temporal + 'static)>,
+    info: &VideoInfo,
+    secs: f64,
+) -> Result<Preview> {
+    if secs <= 0.0 {
+        bail!("--preview needs a number of seconds above 0");
+    }
+    if o.input == o.output {
+        bail!("the output must not be the input");
+    }
+    let dur = secs.min(info.duration);
+    let start = ((info.duration - dur) / 2.0).max(0.0);
+    let (fn_, fd) = o.out_fps(info);
+    let total = (dur * fn_ as f64 / fd as f64).ceil() as u64;
+    let bar = ProgressBar::with_draw_target(Some(total), indicatif::ProgressDrawTarget::hidden());
+    let part = o.output.with_extension("preview.part.mkv");
+    run_chunk(o, info, engine, temporal, start, dur, &part, &bar)
+        .inspect_err(|_| _ = std::fs::remove_file(&part))?;
+
+    let mp4ish = matches!(ext(&o.output).as_str(), "mp4" | "m4v" | "mov");
+    let mut cmd = Command::new(&o.tools.ffmpeg);
+    cmd.args(["-v", "error", "-y", "-i"])
+        .arg(&part)
+        .args(["-c", "copy"]);
+    if mp4ish && o.codec == Codec::H265 {
+        cmd.args(["-tag:v", "hvc1"]);
+    }
+    if mp4ish {
+        cmd.args(["-movflags", "+faststart"]);
+    }
+    let st = cmd.arg(&o.output).status().context("cannot start ffmpeg")?;
+    let _ = std::fs::remove_file(&part);
+    if !st.success() {
+        bail!("ffmpeg could not write the preview clip ({st})");
+    }
+
+    // One frame from the middle, before and after, side by side.
+    let (w, h) = Options::frame_size(info);
+    let (ow, oh) = (w * engine.scale(), h * engine.scale());
+    let mut plain = o.clone();
+    plain.denoise = Denoise::Off;
+    let compare = o.output.with_extension("compare.png");
+    let graph = format!(
+        "[0:v]{},scale={ow}:{oh}:flags=neighbor,setsar=1[a];[1:v]scale={ow}:{oh},setsar=1[b];[a][b]hstack",
+        plain.decode_filters(info).replace(",format=rgb24", "")
+    );
+    let st = Command::new(&o.tools.ffmpeg)
+        .args(["-v", "error", "-y", "-ss"])
+        .arg(format!("{:.3}", start + dur / 2.0))
+        .arg("-i")
+        .arg(&o.input)
+        .arg("-ss")
+        .arg(format!("{:.3}", dur / 2.0))
+        .arg("-i")
+        .arg(&o.output)
+        .args(["-filter_complex", &graph, "-frames:v", "1"])
+        .arg(&compare)
+        .status()
+        .context("cannot start ffmpeg")?;
+    if !st.success() {
+        bail!("ffmpeg could not make the before/after picture ({st})");
+    }
+    Ok(Preview {
+        clip: o.output.clone(),
+        compare,
+    })
 }
 
 /// Restores `o.input` into `o.output` with `engine`, resuming an unfinished run.

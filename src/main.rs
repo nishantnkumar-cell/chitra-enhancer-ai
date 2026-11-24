@@ -37,9 +37,14 @@ struct Args {
     #[arg(long)]
     temporal_model: Option<PathBuf>,
     /// Noise level for --temporal-model on a 0..255 scale: 5 faint, 20 clearly
-    /// noisy, 40 very noisy. Too high smooths real detail.
-    #[arg(long, default_value_t = 20.0)]
-    temporal_sigma: f32,
+    /// noisy, 40 very noisy. Too high smooths real detail. Default: measured
+    /// from the video itself.
+    #[arg(long)]
+    temporal_sigma: Option<f32>,
+    /// Try the settings on just this many seconds from the middle of the video:
+    /// writes the short clip to -o plus a before/after picture next to it.
+    #[arg(long, value_name = "SECONDS")]
+    preview: Option<f64>,
     /// Print `PROGRESS done total` lines on stdout (used by the GUI).
     #[arg(long, hide = true)]
     progress: bool,
@@ -121,7 +126,9 @@ fn real_main() -> Result<()> {
     {
         bail!("--scale must be 1 to 4");
     }
-    if !(0.0..=100.0).contains(&a.temporal_sigma) {
+    if a.temporal_sigma
+        .is_some_and(|v| !(0.0..=100.0).contains(&v))
+    {
         bail!("--temporal-sigma must be 0 to 100");
     }
     if a.grain.is_some_and(|g| g > 30) {
@@ -176,6 +183,29 @@ fn real_main() -> Result<()> {
     if let Some(t) = a.scale {
         engine = Rescaled::wrap(engine, t);
     }
+    #[cfg_attr(not(feature = "onnx"), allow(unused_variables))]
+    let sigma = match a.temporal_sigma {
+        Some(v) => v,
+        None if a.temporal_model.is_some() || a.dry_run => {
+            match chitra_enhance::noise::estimate_video(&o, &info)? {
+                Some(v) => {
+                    // FastDVDnet does best when told the noise is somewhat
+                    // stronger than it is (tuned on three test clips: the best
+                    // setting was 1.5-2x the measured level).
+                    let used = (v * 1.6).clamp(3.0, 60.0);
+                    eprintln!(
+                        "Measured noise level: about {v:.0} (0-255 scale); using {used:.0} for the denoiser"
+                    );
+                    used
+                }
+                None => {
+                    eprintln!("Could not measure the noise level; using 15");
+                    15.0
+                }
+            }
+        }
+        None => 15.0,
+    };
     let mut temporal: Option<Box<dyn chitra_enhance::temporal::Temporal>> = match &a.temporal_model
     {
         #[cfg(feature = "onnx")]
@@ -184,7 +214,7 @@ fn real_main() -> Result<()> {
             a.device,
             a.vram_budget * 1024,
             a.tile_size,
-            a.temporal_sigma,
+            sigma,
         )?)),
         #[cfg(not(feature = "onnx"))]
         Some(_) => bail!(
@@ -201,6 +231,21 @@ fn real_main() -> Result<()> {
         return Ok(());
     }
     ctrlc::set_handler(|| video::STOP.store(true, Ordering::Relaxed))?;
+    if let Some(secs) = a.preview {
+        if o.output.exists() && !a.force {
+            bail!(
+                "{} exists; a preview would replace it (use --force, or another name)",
+                o.output.display()
+            );
+        }
+        let p = video::preview(&o, engine.as_mut(), temporal.as_deref_mut(), &info, secs)?;
+        eprintln!(
+            "Preview clip: {}\nBefore/after picture: {}",
+            p.clip.display(),
+            p.compare.display()
+        );
+        return Ok(());
+    }
     let s = video::run(&o, engine.as_mut(), temporal.as_deref_mut(), &info)?;
     eprintln!(
         "Done: {} frames in {} chunks ({} resumed) in {:.0} s -> {}",

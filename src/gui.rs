@@ -40,6 +40,10 @@ struct App {
     phase: Phase,
     restart: bool,
     started: Option<std::time::Instant>,
+    /// The running job is a preview (its before/after picture is shown at the end).
+    is_preview: bool,
+    preview_clip: Option<PathBuf>,
+    preview_tex: Option<egui::TextureHandle>,
 }
 
 fn cli_path() -> PathBuf {
@@ -98,14 +102,26 @@ impl App {
             phase: Phase::Idle,
             restart: false,
             started: None,
+            is_preview: false,
+            preview_clip: None,
+            preview_tex: None,
         }
     }
 
-    fn start(&mut self, ctx: &egui::Context) {
-        let mut args = self.s.args();
-        if self.restart {
+    fn start(&mut self, ctx: &egui::Context, preview: bool) {
+        let mut s = self.s.clone();
+        if preview {
+            s.output = job::preview_output(&s.input);
+        }
+        let mut args = s.args();
+        if preview {
+            args.extend(["--preview".into(), "5".into(), "--force".into()]);
+        } else if self.restart {
             args.push("--restart".into());
         }
+        self.is_preview = preview;
+        self.preview_tex = None;
+        self.preview_clip = preview.then(|| s.output.clone());
         let mut cmd = Command::new(cli_path());
         cmd.args(&args)
             .stdout(Stdio::piped())
@@ -205,6 +221,21 @@ impl App {
     }
 }
 
+/// Opens a file with the system's default program.
+fn open_file(p: &Path) {
+    let (prog, args): (&str, Vec<&std::ffi::OsStr>) = if cfg!(windows) {
+        (
+            "cmd",
+            vec!["/C".as_ref(), "start".as_ref(), "".as_ref(), p.as_os_str()],
+        )
+    } else if cfg!(target_os = "macos") {
+        ("open", vec![p.as_os_str()])
+    } else {
+        ("xdg-open", vec![p.as_os_str()])
+    };
+    let _ = Command::new(prog).args(args).spawn();
+}
+
 fn setup_style(ctx: &egui::Context) {
     let mut v = egui::Visuals::dark();
     v.panel_fill = Color32::from_rgb(0x17, 0x19, 0x1c);
@@ -219,6 +250,18 @@ impl eframe::App for App {
         self.poll();
         if self.run.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        if self.phase == Phase::Done && self.is_preview && self.preview_tex.is_none() {
+            if let Some(clip) = &self.preview_clip
+                && let Ok(img) = image::open(clip.with_extension("compare.png"))
+            {
+                let rgba = img.to_rgba8();
+                let size = [rgba.width() as usize, rgba.height() as usize];
+                let color = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                self.preview_tex =
+                    Some(ctx.load_texture("preview", color, egui::TextureOptions::LINEAR));
+            }
+            self.is_preview = false;
         }
         let running = self.phase == Phase::Running;
         let photo = job::is_photo(&self.s.input);
@@ -262,10 +305,19 @@ impl eframe::App for App {
                                     &mut self.s.five_frame_model,
                                     &["onnx"],
                                 );
-                                ui.add(
-                                    egui::Slider::new(&mut self.s.sigma, 0.0..=60.0)
-                                        .text("Noise level"),
-                                );
+                                let mut auto = self.s.sigma.is_none();
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(&mut auto, "Measure noise level");
+                                    if !auto {
+                                        let v = self.s.sigma.get_or_insert(15.0);
+                                        ui.add(egui::Slider::new(v, 0.0..=60.0));
+                                    }
+                                });
+                                if auto {
+                                    self.s.sigma = None;
+                                } else if self.s.sigma.is_none() {
+                                    self.s.sigma = Some(15.0);
+                                }
                             } else {
                                 egui::ComboBox::from_label("Simple denoise")
                                     .selected_text(self.s.denoise.clone())
@@ -384,7 +436,15 @@ impl eframe::App for App {
                     };
                     let b = ui.add_enabled(problem.is_none(), egui::Button::new(label));
                     if b.clicked() {
-                        self.start(ctx);
+                        self.start(ctx, false);
+                    }
+                    if !photo
+                        && ui
+                            .add_enabled(problem.is_none(), egui::Button::new("Preview 5 s"))
+                            .on_hover_text("Try these settings on 5 seconds from the middle")
+                            .clicked()
+                    {
+                        self.start(ctx, true);
                     }
                     if let Some(p) = &problem
                         && !self.s.input.as_os_str().is_empty()
@@ -401,6 +461,17 @@ impl eframe::App for App {
                         .small(),
                 );
             });
+            if let Some(tex) = &self.preview_tex {
+                ui.label(RichText::new("Preview: original (left) and result (right)").strong());
+                let avail = ui.available_width();
+                let ratio = tex.size()[1] as f32 / tex.size()[0] as f32;
+                ui.image((tex.id(), egui::vec2(avail, avail * ratio)));
+                if let Some(c) = &self.preview_clip
+                    && ui.button("Play the preview clip").clicked()
+                {
+                    open_file(c);
+                }
+            }
             ui.label(RichText::new("Log").strong());
             egui::ScrollArea::vertical()
                 .stick_to_bottom(true)
