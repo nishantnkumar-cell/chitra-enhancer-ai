@@ -412,7 +412,11 @@ mod tests {
         let a = s.preview_args();
         let at = |f: &str| a.iter().position(|x| x == f).map(|i| a[i + 1].as_str());
         assert_eq!(at("--preview"), Some("30"));
-        assert_eq!(at("-o"), Some("/v/old-preview.mp4"));
+        assert_eq!(
+            Path::new(at("-o").unwrap()),
+            Path::new("/v/old-preview.mp4"),
+            "compared as paths: Windows writes the separator differently"
+        );
         assert!(a.contains(&"--force".to_string()));
         s.preview_secs = 0;
         assert!(s.preview_args().contains(&"1".to_string()));
