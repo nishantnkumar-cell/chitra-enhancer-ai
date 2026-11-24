@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{Receiver, channel};
 
+use chitra_enhance::analyze::Report;
 use chitra_enhance::job::{self, Settings};
 use eframe::egui::{self, Color32, RichText};
 
@@ -15,6 +16,12 @@ const TEAL: Color32 = Color32::from_rgb(0x3f, 0xd0, 0xb5);
 enum Msg {
     Progress(u64, u64),
     Line(String),
+}
+
+/// Answers from the command-line program to a question (nothing is changed).
+enum Answer {
+    Titles(Result<Vec<(u32, f64)>, String>),
+    Analysis(Result<Box<Report>, String>),
 }
 
 struct Running {
@@ -49,6 +56,11 @@ struct App {
     /// (measured, suggested) noise level of the chosen video.
     measured: Option<(f32, f32)>,
     measure_note: String,
+    query_rx: Option<Receiver<Answer>>,
+    /// Titles of the chosen DVD.
+    titles: Vec<(u32, f64)>,
+    report: Option<Box<Report>>,
+    query_note: String,
     /// Every .onnx in the models folder.
     library: Vec<PathBuf>,
 }
@@ -108,8 +120,9 @@ impl App {
     fn new() -> App {
         let mut s = Settings::default();
         if let Some(dir) = job::models_dir() {
-            s.model = job::find_model(&dir, "realesr", true);
-            s.five_frame_model = job::find_model(&dir, "fastdvdnet", true);
+            let fp16 = chitra_enhance::models::likely_gpu();
+            s.model = job::find_model(&dir, "realesr", fp16);
+            s.five_frame_model = job::find_model(&dir, "fastdvdnet", fp16);
         }
         App {
             s,
@@ -128,6 +141,10 @@ impl App {
             measure_rx: None,
             measured: None,
             measure_note: String::new(),
+            query_rx: None,
+            titles: vec![],
+            report: None,
+            query_note: String::new(),
             library: job::models_dir()
                 .map(|d| chitra_enhance::models::library(&d))
                 .unwrap_or_default(),
@@ -205,16 +222,17 @@ impl App {
     /// Looks for the model files in the usual folder.
     fn find_models(&mut self) {
         if let Some(dir) = job::models_dir() {
+            let fp16 = chitra_enhance::models::likely_gpu();
             self.s.model = self
                 .s
                 .model
                 .take()
-                .or_else(|| job::find_model(&dir, "realesr", true));
+                .or_else(|| job::find_model(&dir, "realesr", fp16));
             self.s.five_frame_model = self
                 .s
                 .five_frame_model
                 .take()
-                .or_else(|| job::find_model(&dir, "fastdvdnet", true));
+                .or_else(|| job::find_model(&dir, "fastdvdnet", fp16));
         }
     }
 
@@ -241,6 +259,97 @@ impl App {
         });
         self.measure_rx = Some(rx);
         self.measure_note = "measuring…".into();
+    }
+
+    /// A new input: forget everything learnt about the old one.
+    fn choose(&mut self, ctx: &egui::Context, p: PathBuf) {
+        self.s.output = job::default_output(&p);
+        self.s.input = p;
+        self.s.title = None;
+        self.phase = Phase::Idle;
+        self.titles.clear();
+        self.report = None;
+        self.query_rx = None;
+        self.query_note.clear();
+        self.measured = None;
+        self.measure_note.clear();
+        self.preview_tex = None;
+        if chitra_enhance::disc::source(&self.s.input).is_some() {
+            self.ask(ctx, true);
+        }
+    }
+
+    /// Lists the DVD's titles (`titles`) or analyses the input, in the background.
+    fn ask(&mut self, ctx: &egui::Context, titles: bool) {
+        let args = if titles {
+            vec![
+                "-i".into(),
+                self.s.input.display().to_string(),
+                "--list-titles".into(),
+                "--progress".into(),
+            ]
+        } else {
+            self.s.analyze_args()
+        };
+        let (tx, rx) = channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let mut cmd = Command::new(cli_path());
+            cmd.args(args).stdin(Stdio::null());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x0800_0000);
+            }
+            let done = match cmd.output() {
+                Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout).into_owned()),
+                Ok(o) => Err(String::from_utf8_lossy(&o.stderr)
+                    .lines()
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("it failed")
+                    .to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            let answer = if titles {
+                Answer::Titles(done.map(|t| t.lines().filter_map(job::parse_title).collect()))
+            } else {
+                Answer::Analysis(done.and_then(|t| {
+                    t.lines()
+                        .find_map(job::parse_analysis)
+                        .map(Box::new)
+                        .ok_or_else(|| "no analysis was returned".to_string())
+                }))
+            };
+            let _ = tx.send(answer);
+            ctx.request_repaint();
+        });
+        self.query_rx = Some(rx);
+        self.query_note = if titles {
+            "reading the disc…".into()
+        } else {
+            "looking at a few places in the video…".into()
+        };
+    }
+
+    fn take_answer(&mut self) {
+        let Some(rx) = &self.query_rx else { return };
+        let Ok(answer) = rx.try_recv() else { return };
+        self.query_rx = None;
+        self.query_note.clear();
+        match answer {
+            Answer::Titles(Ok(t)) => self.titles = t,
+            Answer::Analysis(Ok(r)) => {
+                let dir = job::models_dir();
+                let fp16 = chitra_enhance::models::likely_gpu();
+                let find = |p: &str| dir.as_deref().and_then(|d| job::find_model(d, p, fp16));
+                self.s
+                    .apply(&r.suggestion, find("realesr"), find("fastdvdnet"));
+                self.report = Some(r);
+                self.query_note = "suggested settings filled in: change anything you like".into();
+            }
+            Answer::Titles(Err(e)) | Answer::Analysis(Err(e)) => self.query_note = e,
+        }
     }
 
     fn stop(&mut self) {
@@ -355,6 +464,7 @@ impl eframe::App for App {
     fn ui(&mut self, root: &mut egui::Ui, _: &mut eframe::Frame) {
         let ctx = root.ctx().clone();
         let ctx = &ctx;
+        self.take_answer();
         let running = self.phase == Phase::Running;
         let photo = job::is_photo(&self.s.input);
 
@@ -540,21 +650,27 @@ impl eframe::App for App {
                     if ui.button("Choose a video or photo…").clicked()
                         && let Some(p) = pick_file("Choose a file", &[])
                     {
-                        self.s.output = job::default_output(&p);
-                        self.s.input = p;
-                        self.phase = Phase::Idle;
+                        self.choose(ctx, p);
                     }
                     if ui
-                        .button("Choose a folder…")
-                        .on_hover_text("Every photo and video in it, one after the other")
+                        .button("DVD image…")
+                        .on_hover_text("An .iso of a disc without copy protection")
+                        .clicked()
+                        && let Some(p) = pick_file("Choose a DVD image", &["iso", "img"])
+                    {
+                        self.choose(ctx, p);
+                    }
+                    if ui
+                        .button("Folder or disc…")
+                        .on_hover_text(
+                            "A DVD drive or a folder with VIDEO_TS, or a folder of photos and videos",
+                        )
                         .clicked()
                         && let Some(p) = rfd::FileDialog::new()
-                            .set_title("Choose a folder")
+                            .set_title("Choose a folder or disc")
                             .pick_folder()
                     {
-                        self.s.output = job::default_output(&p);
-                        self.s.input = p;
-                        self.phase = Phase::Idle;
+                        self.choose(ctx, p);
                     }
                     ui.label(RichText::new(self.s.input.display().to_string()).monospace());
                 });
@@ -565,6 +681,64 @@ impl eframe::App for App {
                         self.s.output = PathBuf::from(text);
                     }
                 });
+                let disc = chitra_enhance::disc::source(&self.s.input).is_some();
+                if disc && !self.titles.is_empty() {
+                    let name = |n: &Option<String>| match n.as_deref() {
+                        None => "the longest title".to_string(),
+                        Some("all") => "all titles (into a folder)".to_string(),
+                        Some(n) => format!("title {n}"),
+                    };
+                    let before = self.s.title.clone();
+                    egui::ComboBox::from_label("DVD title")
+                        .selected_text(name(&self.s.title))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.s.title, None, "the longest title");
+                            for (n, secs) in &self.titles {
+                                ui.selectable_value(
+                                    &mut self.s.title,
+                                    Some(n.to_string()),
+                                    format!(
+                                        "title {n}  ({}:{:02})",
+                                        *secs as u64 / 60,
+                                        *secs as u64 % 60
+                                    ),
+                                );
+                            }
+                            ui.selectable_value(
+                                &mut self.s.title,
+                                Some("all".to_string()),
+                                "all titles (into a folder)",
+                            );
+                        });
+                    if self.s.title != before {
+                        let all = self.s.title.as_deref() == Some("all");
+                        let plain = job::default_output(&self.s.input);
+                        self.s.output = if all {
+                            plain.with_extension("")
+                        } else {
+                            plain
+                        };
+                        self.report = None;
+                    }
+                }
+                if !self.s.input.as_os_str().is_empty()
+                    && !job::is_photo(&self.s.input)
+                    && (disc || self.s.input.is_file())
+                {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(
+                                self.query_rx.is_none(),
+                                egui::Button::new("Analyse and suggest settings"),
+                            )
+                            .on_hover_text("Looks at a few places; changes nothing in the video")
+                            .clicked()
+                        {
+                            self.ask(ctx, false);
+                        }
+                        ui.label(RichText::new(&self.query_note).weak());
+                    });
+                }
             });
             ui.add_space(8.0);
 
@@ -641,6 +815,18 @@ impl eframe::App for App {
                         .small(),
                 );
             });
+            if let Some(r) = &self.report {
+                egui::CollapsingHeader::new("What the analysis found")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        for line in &r.reasons {
+                            ui.label(format!("• {line}"));
+                        }
+                        for line in &r.notes {
+                            ui.label(RichText::new(format!("• {line}")).weak());
+                        }
+                    });
+            }
             if let Some(tex) = &self.preview_tex {
                 ui.label(RichText::new("Preview: original (left) and result (right)").strong());
                 let avail = ui.available_width();

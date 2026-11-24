@@ -47,6 +47,32 @@ the measurement and then adjust it), grain (`--grain 0..30`), deinterlacing
 (`--chunk-seconds`), output name, device and GPU memory. `--measure-noise` prints
 what it measured and suggests. Previews can be 1 to 30 seconds (`--preview`).
 
+## Let it suggest settings
+
+`chitra-enhance -i tape.mp4 --analyze` looks at a few places in the video, changes
+nothing, and suggests settings with the reasons: whether it is interlaced, how much
+noise there really is, whether to use the AI upscaler or five-frame denoiser, and
+the matching command line. It also reports what it can see but not yet correct
+(black edges, a colour cast, blown-out whites). The window has **Analyse and
+suggest settings**, which fills the settings in; every one can still be changed.
+
+## DVDs
+
+`-i` also takes a DVD: an `.iso` image, a drive, or a folder holding `VIDEO_TS`.
+
+```
+chitra-enhance -i wedding.iso --list-titles
+chitra-enhance -i wedding.iso --analyze            # the longest title
+chitra-enhance -i wedding.iso -o wedding.mp4 ...   # --title 2, or --title all (into a folder)
+```
+
+A title is first copied off the disc without re-encoding (kept beside the result
+until it is finished, so a stopped run resumes; allow a few GB), then restored like
+any video, including `--preview`. **Only discs without copy protection**, such as
+your own recordings, are accepted: the program checks the disc and refuses a
+protected one, and ships no decryption. Needs ffmpeg 7 or newer built with the
+`dvdvideo` reader (libdvdread, libdvdnav).
+
 ## Trying settings first
 
 `--preview 5` processes only 5 seconds from the middle of the video with your real

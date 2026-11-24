@@ -37,6 +37,8 @@ pub struct Settings {
     pub chunk_secs: Option<u32>,
     /// Keep both fields of interlaced video (twice the frames).
     pub double_rate: bool,
+    /// DVD only: a title number or "all"; None = the longest title.
+    pub title: Option<String>,
 }
 
 impl Default for Settings {
@@ -63,6 +65,7 @@ impl Default for Settings {
             tile: None,
             chunk_secs: None,
             double_rate: false,
+            title: None,
         }
     }
 }
@@ -105,6 +108,19 @@ pub fn is_video(p: &Path) -> bool {
 /// `clip.avi` -> `clip-enhanced.mp4` next to it; `photo.jpg` -> `photo-enhanced.jxl`.
 /// Never the input itself.
 pub fn default_output(input: &Path) -> PathBuf {
+    if let Some(src) = crate::disc::source(input) {
+        let stem = src.file_stem().unwrap_or_default().to_string_lossy();
+        let name = format!(
+            "{}-enhanced.mp4",
+            if stem.is_empty() { "dvd".into() } else { stem }
+        );
+        // A disc image: next to it. A drive or disc folder is often read-only,
+        // so the result goes to the home folder.
+        return match std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            Some(home) if !src.is_file() => PathBuf::from(home).join(name),
+            _ => src.with_file_name(name),
+        };
+    }
     if input.is_dir() {
         // A whole folder: results go into a folder next to it.
         return input.with_file_name(format!(
@@ -130,7 +146,8 @@ impl Settings {
         if self.input.as_os_str().is_empty() {
             return Some("Choose a video or photo first.".into());
         }
-        if !self.input.is_file() && !self.input.is_dir() {
+        let disc = crate::disc::source(&self.input).is_some();
+        if !self.input.is_file() && !self.input.is_dir() && !disc {
             return Some("The chosen file or folder does not exist.".into());
         }
         if self.output.as_os_str().is_empty() {
@@ -139,16 +156,54 @@ impl Settings {
         if self.output == self.input {
             return Some("The result must not overwrite the original.".into());
         }
-        if self.output.is_file() && self.input.is_dir() {
+        if self.output.is_file() && self.input.is_dir() && !disc {
             return Some("A folder needs a folder to save into, not a file.".into());
         }
-        if self.output.is_file() && !self.overwrite && !self.input.is_dir() {
+        if self.output.is_file() && !self.overwrite && (disc || !self.input.is_dir()) {
             return Some("The result file exists: tick \"Replace\" or pick another name.".into());
         }
         if self.five_frame && self.five_frame_model.is_none() {
             return Some("Pick the five-frame denoising model, or turn that option off.".into());
         }
         None
+    }
+
+    /// Takes over what an analysis suggested. Everything stays editable.
+    pub fn apply(
+        &mut self,
+        s: &crate::analyze::Suggestion,
+        upscaler: Option<PathBuf>,
+        denoiser: Option<PathBuf>,
+    ) {
+        self.scale = s.scale;
+        self.model = if s.ai_upscaler { upscaler } else { None };
+        self.five_frame = s.five_frame && denoiser.is_some();
+        if denoiser.is_some() {
+            self.five_frame_model = denoiser;
+        }
+        self.sigma = s.sigma;
+        self.denoise = s.denoise.clone();
+        self.deinterlace = if s.deinterlace { "on" } else { "off" }.into();
+        self.double_rate = s.double_rate;
+        self.grain = Some(s.grain);
+        self.crf = Some(s.crf);
+    }
+
+    /// Arguments that analyse the input and print suggestions.
+    pub fn analyze_args(&self) -> Vec<String> {
+        let mut a = vec![
+            "-i".into(),
+            self.input.to_string_lossy().into_owned(),
+            "--analyze".into(),
+            "--progress".into(),
+        ];
+        if crate::disc::source(&self.input).is_some()
+            && let Some(t) = &self.title
+            && t != "all"
+        {
+            a.extend(["--title".into(), t.clone()]);
+        }
+        a
     }
 
     /// Arguments for a preview: the same settings on `preview_secs` seconds,
@@ -199,7 +254,11 @@ impl Settings {
             a.extend(["--tile-size".into(), t.to_string()]);
         }
         // A folder gets both sets of options; each file uses the ones that fit it.
-        let folder = self.input.is_dir();
+        let disc = crate::disc::source(&self.input).is_some();
+        let folder = self.input.is_dir() && !disc;
+        if disc && let Some(t) = &self.title {
+            a.extend(["--title".into(), t.clone()]);
+        }
         if is_photo(&self.input) || folder {
             if let Some(m) = &self.model_compressed {
                 a.extend(["--model-compressed".into(), s(m)]);
@@ -249,6 +308,17 @@ pub fn parse_progress(line: &str) -> Option<(u64, u64)> {
     let done = it.next()?.parse().ok()?;
     let total = it.next()?.parse().ok()?;
     Some((done, total))
+}
+
+/// `ANALYSIS {...}` -> the report.
+pub fn parse_analysis(line: &str) -> Option<crate::analyze::Report> {
+    serde_json::from_str(line.strip_prefix("ANALYSIS ")?).ok()
+}
+
+/// `TITLE 2 3600` -> (title 2, 3600 seconds).
+pub fn parse_title(line: &str) -> Option<(u32, f64)> {
+    let mut it = line.strip_prefix("TITLE ")?.split_whitespace();
+    Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
 }
 
 /// `NOISE 8.2 13` -> (measured 8.2, suggested 13); `NOISE none` -> None.
@@ -491,6 +561,47 @@ mod tests {
         assert_eq!(parse_noise("NOISE 8.2 13"), Some((8.2, 13.0)));
         assert_eq!(parse_noise("NOISE none"), None);
         assert_eq!(parse_noise("Done"), None);
+    }
+
+    #[test]
+    fn a_dvd_gets_a_title_option_and_suggestions_can_be_applied() {
+        let d = tempfile::tempdir().unwrap();
+        let iso = d.path().join("wedding.iso");
+        std::fs::write(&iso, b"x").unwrap();
+        let mut s = Settings {
+            input: iso.clone(),
+            output: default_output(&iso),
+            title: Some("2".into()),
+            ..Settings::default()
+        };
+        assert_eq!(s.output, d.path().join("wedding-enhanced.mp4"));
+        assert_eq!(s.problem(), None);
+        let a = s.args();
+        let at = |a: &[String], f: &str| a.iter().position(|x| x == f).map(|i| a[i + 1].clone());
+        assert_eq!(at(&a, "--title").as_deref(), Some("2"));
+        assert_eq!(at(&s.analyze_args(), "--title").as_deref(), Some("2"));
+        let sug = crate::analyze::Suggestion {
+            deinterlace: true,
+            double_rate: true,
+            denoise: "light".into(),
+            five_frame: false,
+            sigma: None,
+            scale: 2,
+            ai_upscaler: true,
+            grain: 0,
+            crf: 18,
+        };
+        s.apply(&sug, Some("/m/up.onnx".into()), Some("/m/dn.onnx".into()));
+        let a = s.args();
+        assert_eq!(at(&a, "--model").as_deref(), Some("/m/up.onnx"));
+        assert_eq!(at(&a, "--deinterlace").as_deref(), Some("on"));
+        assert_eq!(at(&a, "--denoise").as_deref(), Some("light"));
+        assert_eq!(at(&a, "--grain").as_deref(), Some("0"));
+        assert_eq!(at(&a, "--crf").as_deref(), Some("18"));
+        assert!(a.contains(&"--double-rate".to_string()));
+        assert!(!a.contains(&"--temporal-model".to_string()));
+        assert_eq!(parse_title("TITLE 2 3600"), Some((2, 3600.0)));
+        assert_eq!(parse_title("x"), None);
     }
 
     #[test]

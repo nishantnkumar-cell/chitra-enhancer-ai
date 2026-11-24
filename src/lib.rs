@@ -1,5 +1,7 @@
 //! Chitra Enhancer AI: restore and upscale old, noisy video (and photos).
 
+pub mod analyze;
+pub mod disc;
 pub mod engine;
 pub mod ffmpeg;
 pub mod infer;

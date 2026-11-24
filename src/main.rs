@@ -7,17 +7,34 @@ use clap::Parser;
 use chitra_enhance::engine::{Engine, Lanczos, Rescaled};
 use chitra_enhance::ffmpeg::{self, Tools};
 use chitra_enhance::video::{self, Codec, Deinterlace, Denoise, Options, Stopped};
+use chitra_enhance::{analyze, disc};
+
+/// Accepts an empty path (meaning "not given"), which clap's own parser refuses.
+fn any_path(s: &str) -> Result<PathBuf, std::convert::Infallible> {
+    Ok(PathBuf::from(s))
+}
 
 /// Restore and enlarge old, noisy video (camcorder, tape) on your own computer.
 #[derive(Parser, Debug, Clone)]
 #[command(version, about)]
 struct Args {
-    /// The video to restore.
+    /// The video or photo to restore, a folder of them, or a DVD (an .iso image,
+    /// a drive, or a folder holding VIDEO_TS).
     #[arg(short, long)]
     input: PathBuf,
-    /// Where to write the result (never the input). .mp4, .mkv or .mov.
-    #[arg(short, long)]
+    /// Where to write the result (never the input). .mp4, .mkv or .mov; a folder
+    /// for a batch or for every title of a DVD. Not needed with --analyze.
+    #[arg(short, long, default_value = "", value_parser = any_path)]
     output: PathBuf,
+    /// Look at a few places in the video and suggest settings, changing nothing.
+    #[arg(long)]
+    analyze: bool,
+    /// DVD only: show the titles on the disc.
+    #[arg(long)]
+    list_titles: bool,
+    /// DVD only: a title number, or "all". Default: the longest title.
+    #[arg(long, value_name = "N|all")]
+    title: Option<String>,
     /// How many times larger the picture becomes. Default: the model's own
     /// scale, or 2 without a model. A different number resizes the model's result.
     #[arg(long)]
@@ -244,10 +261,273 @@ fn real_main() -> Result<()> {
         return models_command(&argv[1..]);
     }
     let a = Args::parse();
+    if let Some(src) = disc::source(&a.input) {
+        return disc_mode(a, src);
+    }
+    if a.list_titles || a.title.is_some() {
+        bail!("--title and --list-titles are for DVDs");
+    }
+    if a.analyze {
+        return analyze_file(&a);
+    }
+    need_output(&a)?;
     if a.input.is_dir() {
         return batch(a);
     }
     run_one(a)
+}
+
+fn need_output(a: &Args) -> Result<()> {
+    if a.output.as_os_str().is_empty() {
+        bail!("say where to write the result with -o");
+    }
+    Ok(())
+}
+
+/// Which of the downloaded models could be suggested.
+fn installed_models() -> (Option<PathBuf>, Option<PathBuf>) {
+    use chitra_enhance::job;
+    let Some(dir) = job::models_dir() else {
+        return (None, None);
+    };
+    // The CPU build of a model is the faster one without a GPU.
+    let fp16 = chitra_enhance::models::likely_gpu();
+    (
+        job::find_model(&dir, "realesr", fp16),
+        job::find_model(&dir, "fastdvdnet", fp16),
+    )
+}
+
+fn analyze_file(a: &Args) -> Result<()> {
+    if !a.input.is_file() || is_photo(&a.input) {
+        bail!("--analyze looks at one video or a DVD");
+    }
+    let tools = Tools::locate(a.ffmpeg.as_deref())?;
+    let input = std::path::absolute(&a.input)?;
+    let info = ffmpeg::probe(&tools, &input)?;
+    let samples: Vec<_> = analyze::positions(info.duration)
+        .into_iter()
+        .map(|p| (input.clone(), p))
+        .collect();
+    show_analysis(a, &tools, &info, &samples)
+}
+
+fn show_analysis(
+    a: &Args,
+    tools: &Tools,
+    info: &ffmpeg::VideoInfo,
+    samples: &[(PathBuf, f64)],
+) -> Result<()> {
+    use chitra_enhance::job;
+    let (upscaler, denoiser) = installed_models();
+    let have = analyze::Available {
+        upscaler: upscaler.is_some(),
+        denoiser: denoiser.is_some(),
+    };
+    let r = analyze::run(tools, info, samples, have)?;
+    println!(
+        "Looked at {} places: {}x{} at {:.3} fps, {:.0} s, {}; noise about {:.1} of 255.",
+        r.samples,
+        r.width,
+        r.height,
+        r.fps,
+        r.seconds,
+        if r.interlaced {
+            "interlaced"
+        } else {
+            "progressive"
+        },
+        r.noise
+    );
+    println!("\nSuggested:");
+    for line in &r.reasons {
+        println!("  - {line}");
+    }
+    if !r.notes.is_empty() {
+        println!("\nAlso seen:");
+        for line in &r.notes {
+            println!("  - {line}");
+        }
+    }
+    let mut s = job::Settings {
+        input: a.input.clone(),
+        output: if a.output.as_os_str().is_empty() {
+            job::default_output(&a.input)
+        } else {
+            a.output.clone()
+        },
+        title: a.title.clone(),
+        ..job::Settings::default()
+    };
+    s.apply(&r.suggestion, upscaler, denoiser);
+    let quoted: Vec<String> = s
+        .args()
+        .into_iter()
+        .filter(|x| x != "--progress")
+        .map(|x| {
+            if x.contains(' ') {
+                format!("\"{x}\"")
+            } else {
+                x
+            }
+        })
+        .collect();
+    println!("\nCommand with these settings (change any of them):");
+    println!("  chitra-enhance {}", quoted.join(" "));
+    println!("Add --preview 5 to try them on a few seconds first.");
+    if a.progress {
+        println!("ANALYSIS {}", serde_json::to_string(&r)?);
+    }
+    Ok(())
+}
+
+/// A DVD: list, analyse, preview or restore its titles. A title is first copied
+/// off the disc without re-encoding, then handled like any video.
+fn disc_mode(a: Args, src: PathBuf) -> Result<()> {
+    let tools = Tools::locate(a.ffmpeg.as_deref())?;
+    let src = std::path::absolute(src)?;
+    disc::check_support(&tools)?;
+    disc::check_unprotected(&src)?;
+    let titles = disc::titles(&tools, &src)?;
+    if a.list_titles {
+        for t in &titles {
+            if a.progress {
+                println!("TITLE {} {:.0}", t.number, t.seconds);
+            } else {
+                println!(
+                    "Title {:2}: {}:{:02}",
+                    t.number,
+                    t.seconds as u64 / 60,
+                    t.seconds as u64 % 60
+                );
+            }
+        }
+        return Ok(());
+    }
+    let all = a.title.as_deref() == Some("all");
+    let chosen: Vec<disc::Title> = match a.title.as_deref() {
+        None => disc::longest(&titles).cloned().into_iter().collect(),
+        Some("all") => titles
+            .iter()
+            .filter(|t| t.seconds >= disc::MIN_TITLE_SECONDS)
+            .cloned()
+            .collect(),
+        Some(n) => {
+            let n: u32 = n.parse().context("--title takes a number or \"all\"")?;
+            let t = titles.iter().find(|t| t.number == n).with_context(|| {
+                format!("the disc has no title {n}; it has 1 to {}", titles.len())
+            })?;
+            vec![t.clone()]
+        }
+    };
+    let first = chosen.first().context("no usable title on the disc")?;
+    eprintln!(
+        "DVD with {} title(s); using {}",
+        titles.len(),
+        if all {
+            format!("{} of them", chosen.len())
+        } else {
+            format!("title {} ({:.0} s)", first.number, first.seconds)
+        }
+    );
+
+    if a.analyze || a.measure_noise || a.preview.is_some() {
+        if all {
+            bail!("pick one title with --title for this");
+        }
+        let tmp = tempfile::tempdir()?;
+        if a.analyze {
+            let mut samples = Vec::new();
+            for (i, at) in analyze::positions(first.seconds).into_iter().enumerate() {
+                let f = tmp.path().join(format!("sample{i}.mkv"));
+                disc::import(&tools, &src, first.number, Some((at, 3.0)), &f)?;
+                samples.push((f, 0.0));
+            }
+            let mut info = ffmpeg::probe(&tools, &samples[0].0)?;
+            info.duration = first.seconds;
+            return show_analysis(&a, &tools, &info, &samples);
+        }
+        let len = a.preview.map_or(20.0, |p| p.clamp(1.0, 30.0) + 2.0);
+        let start = ((first.seconds - len) / 2.0).max(0.0);
+        let f = tmp.path().join("sample.mkv");
+        disc::import(&tools, &src, first.number, Some((start, len)), &f)?;
+        let mut one = a.clone();
+        one.input = f;
+        if one.output.as_os_str().is_empty() {
+            if a.preview.is_some() {
+                bail!("say where to write the preview with -o");
+            }
+            one.output = tmp.path().join("unused.mp4");
+        }
+        return run_one(one);
+    }
+
+    need_output(&a)?;
+    let output = std::path::absolute(&a.output)?;
+    if all {
+        std::fs::create_dir_all(&output).context("--title all needs a folder for -o")?;
+    }
+    let stem = src
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "dvd".into());
+    let mut failed = Vec::new();
+    for t in &chosen {
+        let out = if all {
+            output.join(format!("{stem}-title{:02}.mp4", t.number))
+        } else {
+            output.clone()
+        };
+        if out.exists() && !a.force {
+            if all {
+                eprintln!("Title {} is already done, skipping", t.number);
+                continue;
+            }
+            bail!(
+                "{} already exists; use --force to replace it, or choose another name",
+                out.display()
+            );
+        }
+        match disc_title(&a, &tools, &src, t, &out) {
+            Ok(()) => {}
+            Err(e) if !all || e.downcast_ref::<Stopped>().is_some() => return Err(e),
+            Err(e) => {
+                eprintln!("  title {} FAILED: {e:#}", t.number);
+                failed.push(t.number.to_string());
+            }
+        }
+    }
+    if !failed.is_empty() {
+        bail!("these titles failed: {}", failed.join(", "));
+    }
+    Ok(())
+}
+
+fn disc_title(
+    a: &Args,
+    tools: &Tools,
+    src: &std::path::Path,
+    t: &disc::Title,
+    out: &std::path::Path,
+) -> Result<()> {
+    // Kept beside the result until it is finished, so a stopped run resumes
+    // without reading the disc again.
+    let copy = out.with_extension(format!("title{:02}.source.mkv", t.number));
+    let reusable = copy.is_file()
+        && ffmpeg::probe(tools, &copy).is_ok_and(|i| (i.duration - t.seconds).abs() < 2.0);
+    if !reusable {
+        eprintln!("Copying title {} off the disc ...", t.number);
+        disc::import(tools, src, t.number, None, &copy)?;
+    }
+    let mut one = a.clone();
+    one.input = copy.clone();
+    one.output = out.to_path_buf();
+    run_one(one)?;
+    if !a.keep_work && !a.dry_run && a.preview.is_none() {
+        let _ = std::fs::remove_file(&copy);
+    }
+    Ok(())
 }
 
 /// Every photo and video in a folder, one after the other, into another folder.

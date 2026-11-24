@@ -485,6 +485,103 @@ fn interlacing_is_found_even_when_the_header_is_silent() {
 }
 
 #[test]
+fn analyze_suggests_settings_that_run_and_changes_nothing() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let i = d.path().join("in.mp4");
+    make_clip(&i);
+    let before = std::fs::read(&i).unwrap();
+    let r = bin()
+        .args(["-i", i.to_str().unwrap(), "--analyze", "--progress"])
+        // No downloaded models, so the suggestion must work with what is built in.
+        .env("XDG_DATA_HOME", d.path())
+        .env("LOCALAPPDATA", d.path())
+        .env("HOME", d.path())
+        .output()
+        .unwrap();
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let out = String::from_utf8_lossy(&r.stdout);
+    let report = out
+        .lines()
+        .find_map(chitra_enhance::job::parse_analysis)
+        .expect(&out);
+    assert_eq!((report.width, report.height), (160, 120));
+    assert!(!report.suggestion.five_frame && !report.suggestion.ai_upscaler);
+    assert!(out.contains("Command with these settings"), "{out}");
+    assert_eq!(std::fs::read(&i).unwrap(), before);
+    assert_eq!(
+        std::fs::read_dir(d.path()).unwrap().count(),
+        1,
+        "nothing new written"
+    );
+    // Without --analyze an output is still required.
+    let r = bin().args(["-i", i.to_str().unwrap()]).output().unwrap();
+    assert!(!r.status.success());
+    assert!(String::from_utf8_lossy(&r.stderr).contains("-o"));
+}
+
+/// A real DVD image, when `CHITRA_TEST_DVD` names one (at least two titles) and
+/// ffmpeg can read DVDs: list, analyse, restore every title, refuse a title that
+/// is not there.
+#[test]
+fn a_dvd_image_is_listed_analysed_and_restored() {
+    let Some(iso) = std::env::var_os("CHITRA_TEST_DVD") else {
+        eprintln!("CHITRA_TEST_DVD not set: skipped");
+        return;
+    };
+    let iso = std::path::PathBuf::from(iso);
+    let d = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        bin()
+            .arg("-i")
+            .arg(&iso)
+            .args(args)
+            .current_dir(d.path())
+            .output()
+            .unwrap()
+    };
+    let r = run(&["--list-titles", "--progress"]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let titles: Vec<(u32, f64)> = String::from_utf8_lossy(&r.stdout)
+        .lines()
+        .filter_map(chitra_enhance::job::parse_title)
+        .collect();
+    assert!(titles.len() >= 2, "{titles:?}");
+    let r = run(&["--analyze", "--progress"]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    assert!(
+        String::from_utf8_lossy(&r.stdout)
+            .lines()
+            .any(|l| chitra_enhance::job::parse_analysis(l).is_some())
+    );
+    let fast = [
+        "--scale",
+        "1",
+        "--denoise",
+        "off",
+        "--codec",
+        "h264",
+        "--preset",
+        "ultrafast",
+    ];
+    let r = run(&[&["-o", "all", "--title", "all"][..], &fast].concat());
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let made: Vec<_> = std::fs::read_dir(d.path().join("all"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        made.len(),
+        titles.len(),
+        "one result per title, no leftover copies: {made:?}"
+    );
+    assert!(made.iter().all(|n| n.ends_with(".mp4")), "{made:?}");
+    assert!(!run(&["-o", "x.mp4", "--title", "98"]).status.success());
+}
+
+#[test]
 fn the_models_command_lists_and_refuses_unknown_names_without_touching_the_network() {
     let d = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| {
