@@ -1,0 +1,43 @@
+[package]
+name = "chitra-enhance-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+chitra-enhance = { path = ".." }
+
+# Not part of the main package or its Cargo.lock.
+[workspace]
+
+[[bin]]
+name = "inspect_jpeg"
+path = "fuzz_targets/inspect_jpeg.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "photo_decode"
+path = "fuzz_targets/photo_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "noise_gray"
+path = "fuzz_targets/noise_gray.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "text_lines"
+path = "fuzz_targets/text_lines.rs"
+test = false
+doc = false
+bench = false

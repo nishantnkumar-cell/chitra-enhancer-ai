@@ -507,6 +507,18 @@ impl eframe::App for App {
                         self.s.input = p;
                         self.phase = Phase::Idle;
                     }
+                    if ui
+                        .button("Choose a folder…")
+                        .on_hover_text("Every photo and video in it, one after the other")
+                        .clicked()
+                        && let Some(p) = rfd::FileDialog::new()
+                            .set_title("Choose a folder")
+                            .pick_folder()
+                    {
+                        self.s.output = job::default_output(&p);
+                        self.s.input = p;
+                        self.phase = Phase::Idle;
+                    }
                     ui.label(RichText::new(self.s.input.display().to_string()).monospace());
                 });
                 ui.horizontal(|ui| {

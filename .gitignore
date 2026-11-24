@@ -36,3 +36,6 @@ target/
 .ignore
 __pycache__/
 *.pyc
+fuzz/target/
+fuzz/artifacts/
+fuzz/corpus/

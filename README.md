@@ -54,6 +54,16 @@ so you can judge noise level, scale and model in seconds. The window has a
 finished result (the window uses `<name>-preview.mp4`; the command line asks for
 `--force`).
 
+## Whole folders
+
+`chitra-enhance -i tapes/ -o tapes-enhanced/ ...` processes every photo and video in
+a folder, one after the other, with the same settings (the window has *Choose a
+folder…*). Results land in the output folder as `<name>-enhanced.mp4` (video) or
+`.jxl` (photo). A file whose result already exists is skipped, so an interrupted
+batch continues where it stopped (a half-done video resumes inside its own work
+folder); `--force` redoes everything. One bad file is reported and the rest carry
+on; the exit status says if any failed. Ctrl-C stops the whole batch.
+
 ## The window (GUI)
 
 `cargo build --release --features gui,onnx` makes two programs, `chitra-enhance`

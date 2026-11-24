@@ -9,7 +9,7 @@ use chitra_enhance::ffmpeg::{self, Tools};
 use chitra_enhance::video::{self, Codec, Deinterlace, Denoise, Options, Stopped};
 
 /// Restore and enlarge old, noisy video (camcorder, tape) on your own computer.
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(version, about)]
 struct Args {
     /// The video to restore.
@@ -173,6 +173,76 @@ fn real_main() -> Result<()> {
         return models_command(&argv[1..]);
     }
     let a = Args::parse();
+    if a.input.is_dir() {
+        return batch(a);
+    }
+    run_one(a)
+}
+
+/// Every photo and video in a folder, one after the other, into another folder.
+/// A file whose result already exists is skipped, so an interrupted batch picks
+/// up where it stopped (and an interrupted video resumes inside its own work folder).
+fn batch(a: Args) -> Result<()> {
+    use chitra_enhance::job;
+    if a.preview.is_some() || a.measure_noise {
+        bail!("--preview and --measure-noise work on one file at a time");
+    }
+    if a.output.is_file() {
+        bail!(
+            "{} is a file; a folder is needed for a batch",
+            a.output.display()
+        );
+    }
+    std::fs::create_dir_all(&a.output)?;
+    if a.output.canonicalize()? == a.input.canonicalize()? {
+        bail!("the output folder must not be the input folder");
+    }
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&a.input)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file() && (job::is_photo(p) || job::is_video(p)))
+        .collect();
+    files.sort();
+    if files.is_empty() {
+        bail!("no photos or videos in {}", a.input.display());
+    }
+    let (mut done, mut skipped, mut failed) = (0, 0, Vec::new());
+    for (i, f) in files.iter().enumerate() {
+        let name = job::default_output(f);
+        let out = a.output.join(name.file_name().unwrap_or_default());
+        eprintln!("\n[{}/{}] {}", i + 1, files.len(), f.display());
+        if out.exists() && !a.force {
+            eprintln!("  already done ({}), skipping", out.display());
+            skipped += 1;
+            continue;
+        }
+        let mut one = a.clone();
+        one.input = f.clone();
+        one.output = out;
+        match run_one(one) {
+            Ok(()) => done += 1,
+            Err(e) if e.downcast_ref::<Stopped>().is_some() => return Err(e),
+            Err(e) => {
+                eprintln!("  FAILED: {e:#}");
+                failed.push(f.display().to_string());
+            }
+        }
+    }
+    eprintln!(
+        "\nBatch finished: {done} done, {skipped} skipped, {} failed",
+        failed.len()
+    );
+    if !failed.is_empty() {
+        bail!(
+            "{} of {} files failed: {}",
+            failed.len(),
+            files.len(),
+            failed.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn run_one(a: Args) -> Result<()> {
     if !a.input.is_file() {
         bail!("{} is not a file", a.input.display());
     }
@@ -300,7 +370,8 @@ fn real_main() -> Result<()> {
     if a.dry_run {
         return Ok(());
     }
-    ctrlc::set_handler(|| video::STOP.store(true, Ordering::Relaxed))?;
+    // Once per process: a batch runs this for every file.
+    let _ = ctrlc::set_handler(|| video::STOP.store(true, Ordering::Relaxed));
     if let Some(secs) = a.preview {
         if o.output.exists() && !a.force {
             bail!(
