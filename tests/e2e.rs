@@ -190,6 +190,71 @@ fn an_onnx_model_doubles_the_frame_size() {
     assert_eq!(frames(&o).0, "320,240,75");
 }
 
+/// A five-frame denoiser sees the whole clip: every frame comes out once, in
+/// every chunk, including the last frames of a chunk that trail the decoder.
+#[test]
+fn a_temporal_stage_keeps_every_frame_of_every_chunk() {
+    use chitra_enhance::{engine::Lanczos, ffmpeg, temporal::Identity, video};
+    if !have_ffmpeg() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let (i, o) = (d.path().join("in.mp4"), d.path().join("out.mkv"));
+    make_clip(&i);
+    let tools = ffmpeg::Tools::locate(None).unwrap();
+    let info = ffmpeg::probe(&tools, &i).unwrap();
+    let opts = video::Options {
+        input: i,
+        output: o.clone(),
+        tools,
+        denoise: video::Denoise::Off,
+        deinterlace: video::Deinterlace::Off,
+        double_rate: false,
+        codec: video::Codec::H264,
+        crf: Some(20),
+        preset: Some("ultrafast".into()),
+        chunk_secs: 2.0,
+        restart: false,
+        keep_work: false,
+        grain: 0,
+        stop_after_chunks: None,
+    };
+    let mut engine = Lanczos::new(1);
+    let mut temporal = Identity;
+    let s = video::run(&opts, &mut engine, Some(&mut temporal), &info).unwrap();
+    assert_eq!(s.chunks, 3);
+    assert_eq!(s.frames, 75);
+    assert_eq!(frames(&o).0, "160,120,75");
+}
+
+/// A real five-frame model (FastDVDnet), when `CHITRA_TEST_TEMPORAL_MODEL` is set.
+#[cfg(feature = "onnx")]
+#[test]
+fn a_five_frame_onnx_model_denoises_without_changing_the_size() {
+    let (Some(_), Some(model)) = (
+        std::env::var_os("ORT_DYLIB_PATH"),
+        std::env::var_os("CHITRA_TEST_TEMPORAL_MODEL"),
+    ) else {
+        eprintln!("no ONNX Runtime/temporal model configured: skipped");
+        return;
+    };
+    if !have_ffmpeg() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let (i, o) = (d.path().join("in.mp4"), d.path().join("out.mkv"));
+    make_clip(&i);
+    let r = bin()
+        .args(["-i", i.to_str().unwrap(), "-o", o.to_str().unwrap()])
+        .args(["--temporal-model", model.to_str().unwrap()])
+        .args(["--device", "cpu", "--scale", "1", "--denoise", "off"])
+        .args(["--codec", "h264", "--preset", "ultrafast", "--grain", "0"])
+        .output()
+        .unwrap();
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    assert_eq!(frames(&o).0, "160,120,75");
+}
+
 #[test]
 fn photo_mode_writes_16_bit_png_and_refuses_to_overwrite() {
     let d = tempfile::tempdir().unwrap();
