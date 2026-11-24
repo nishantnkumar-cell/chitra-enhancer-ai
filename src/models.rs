@@ -217,6 +217,17 @@ pub fn library(dir: &Path) -> Vec<PathBuf> {
     v
 }
 
+/// A guess at whether a graphics processor will run the models, to pick the
+/// FP16 (GPU) or FP32 (CPU) file. Windows and macOS almost always have a usable
+/// one; on Linux only an NVIDIA card is used.
+pub fn likely_gpu() -> bool {
+    if cfg!(any(windows, target_os = "macos")) {
+        true
+    } else {
+        Path::new("/dev/nvidia0").exists()
+    }
+}
+
 /// Where ONNX Runtime usually lives. `ORT_DYLIB_PATH` always wins; this is the
 /// fallback so most people never have to set it.
 pub fn find_runtime() -> Option<PathBuf> {
