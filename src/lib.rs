@@ -4,6 +4,7 @@ pub mod engine;
 pub mod ffmpeg;
 pub mod infer;
 pub mod inspector;
+pub mod job;
 #[cfg(feature = "onnx")]
 pub mod onnx;
 pub mod photo;

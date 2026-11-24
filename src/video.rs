@@ -24,6 +24,15 @@ use crate::ffmpeg::{Tools, VideoInfo};
 use crate::infer::{plane_from_rgb8, rgb8_from_plane};
 use crate::temporal::{Temporal, Window};
 
+/// When set, `PROGRESS done total` lines are printed on stdout (for the GUI).
+pub static REPORT_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+fn report(bar: &ProgressBar) {
+    if REPORT_PROGRESS.load(Ordering::Relaxed) {
+        println!("PROGRESS {} {}", bar.position(), bar.length().unwrap_or(0));
+    }
+}
+
 /// Set by Ctrl-C (or in tests): the chunk in progress is dropped and the run ends.
 pub static STOP: AtomicBool = AtomicBool::new(false);
 
@@ -420,6 +429,7 @@ fn run_chunk(
             }
             frames += 1;
             bar.inc(1);
+            report(bar);
         }
         if !got {
             break;
@@ -543,6 +553,7 @@ pub fn run(
     );
     let per_chunk = (o.chunk_secs * fps).round() as u64;
     bar.set_position(resumed as u64 * per_chunk);
+    report(&bar);
     if resumed > 0 {
         eprintln!("Carrying on: {resumed} of {chunks} chunks were already done.");
     }

@@ -34,6 +34,16 @@ and 33.1 dB with no denoising. A frame that changes completely (a cut) is
 cleaned from its own side only by the model; at the start and end of each chunk
 the edge frame is repeated, which is invisible in practice.
 
+## The window (GUI)
+
+`cargo build --release --features gui,onnx` makes two programs, `chitra-enhance`
+(command line) and `chitra-enhance-gui` (a window; keep them in the same folder).
+Pick a video or photo, tick *Five-frame AI denoising* for camcorder noise, press
+Start. Stop keeps every finished chunk, and Continue picks up where it left off.
+The window finds models in `~/.local/share/chitra-enhance/models`
+(`%LOCALAPPDATA%\chitra-enhance\models` on Windows) and shows the exact command
+line it runs, so anything done in the window can be repeated in a script.
+
 ## Photos
 
 ```
@@ -79,7 +89,7 @@ On a CPU the FP32 file is the faster one; on a GPU use FP16.
 Video pipeline, resume, tiler, ONNX engine, grain, 1-4x scaling and photo mode
 (JPEG quality tiers, 16-bit JXL/PNG) work, tested with a real Real-ESRGAN model.
 Five-frame video denoising (FastDVDnet) and CI on Linux, Windows and macOS are in.
-Not yet: a GUI.
+The GUI works but has had only a smoke test (it starts and runs), no visual review yet.
 
 ## Licence
 
