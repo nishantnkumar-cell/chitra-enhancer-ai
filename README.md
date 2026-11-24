@@ -36,6 +36,15 @@ and 33.1 dB with no denoising. A frame that changes completely (a cut) is
 cleaned from its own side only by the model; at the start and end of each chunk
 the edge frame is repeated, which is invisible in practice.
 
+## Trying settings first
+
+`--preview 5` processes only 5 seconds from the middle of the video with your real
+settings and writes the short clip plus a before/after still (`<name>.compare.png`),
+so you can judge noise level, scale and model in seconds. The window has a
+**Preview 5 s** button that shows the still. A preview never overwrites a
+finished result (the window uses `<name>-preview.mp4`; the command line asks for
+`--force`).
+
 ## The window (GUI)
 
 `cargo build --release --features gui,onnx` makes two programs, `chitra-enhance`

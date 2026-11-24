@@ -69,6 +69,13 @@ pub fn default_output(input: &Path) -> PathBuf {
     input.with_file_name(format!("{stem}-enhanced.{ext}"))
 }
 
+/// Where a preview clip goes: `clip-preview.mp4` next to the input. It is not
+/// the real output name, so a preview can never overwrite a finished result.
+pub fn preview_output(input: &Path) -> PathBuf {
+    let stem = input.file_stem().unwrap_or_default().to_string_lossy();
+    input.with_file_name(format!("{stem}-preview.mp4"))
+}
+
 impl Settings {
     /// Why the job cannot start yet, if it cannot.
     pub fn problem(&self) -> Option<String> {
@@ -211,6 +218,13 @@ mod tests {
             default_output(Path::new("/p/a.png")),
             Path::new("/p/a-enhanced.jxl")
         );
+    }
+
+    #[test]
+    fn previews_have_their_own_name() {
+        let p = preview_output(Path::new("/v/old tape.avi"));
+        assert_eq!(p, Path::new("/v/old tape-preview.mp4"));
+        assert_ne!(p, default_output(Path::new("/v/old tape.avi")));
     }
 
     #[test]

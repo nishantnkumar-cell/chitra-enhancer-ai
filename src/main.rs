@@ -41,6 +41,10 @@ struct Args {
     /// from the video itself.
     #[arg(long)]
     temporal_sigma: Option<f32>,
+    /// Try the settings on just this many seconds from the middle of the video:
+    /// writes the short clip to -o plus a before/after picture next to it.
+    #[arg(long, value_name = "SECONDS")]
+    preview: Option<f64>,
     /// Print `PROGRESS done total` lines on stdout (used by the GUI).
     #[arg(long, hide = true)]
     progress: bool,
@@ -226,6 +230,21 @@ fn real_main() -> Result<()> {
         return Ok(());
     }
     ctrlc::set_handler(|| video::STOP.store(true, Ordering::Relaxed))?;
+    if let Some(secs) = a.preview {
+        if o.output.exists() && !a.force {
+            bail!(
+                "{} exists; a preview would replace it (use --force, or another name)",
+                o.output.display()
+            );
+        }
+        let p = video::preview(&o, engine.as_mut(), temporal.as_deref_mut(), &info, secs)?;
+        eprintln!(
+            "Preview clip: {}\nBefore/after picture: {}",
+            p.clip.display(),
+            p.compare.display()
+        );
+        return Ok(());
+    }
     let s = video::run(&o, engine.as_mut(), temporal.as_deref_mut(), &info)?;
     eprintln!(
         "Done: {} frames in {} chunks ({} resumed) in {:.0} s -> {}",

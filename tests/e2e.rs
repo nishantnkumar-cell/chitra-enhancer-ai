@@ -256,6 +256,50 @@ fn a_five_frame_onnx_model_denoises_without_changing_the_size() {
 }
 
 #[test]
+fn a_preview_makes_a_short_clip_and_a_before_after_picture_without_touching_real_output() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let (i, o) = (d.path().join("in.mp4"), d.path().join("prev.mp4"));
+    make_clip(&i);
+    let run = |extra: &[&str]| {
+        bin()
+            .args(["-i", i.to_str().unwrap(), "-o", o.to_str().unwrap()])
+            .args(["--preview", "2", "--denoise", "off", "--codec", "h264"])
+            .args(["--preset", "ultrafast", "--scale", "2"])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let r = run(&[]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    // 2 s of the 12.5 fps (interlaced-halved) test clip, doubled in size.
+    let (w, h, n) = {
+        let s = frames(&o).0;
+        let v: Vec<&str> = s.split(',').collect();
+        (
+            v[0].to_string(),
+            v[1].to_string(),
+            v[2].parse::<u32>().unwrap(),
+        )
+    };
+    assert_eq!((w.as_str(), h.as_str()), ("320", "240"));
+    assert!((24..=26).contains(&n), "{n} frames");
+    let still = image::open(d.path().join("prev.compare.png")).unwrap();
+    assert_eq!(
+        (still.width(), still.height()),
+        (640, 240),
+        "two pictures side by side"
+    );
+    // A second preview must not silently replace an existing file.
+    let again = run(&[]);
+    assert!(!again.status.success());
+    assert!(String::from_utf8_lossy(&again.stderr).contains("--force"));
+    assert!(run(&["--force"]).status.success());
+}
+
+#[test]
 fn photo_mode_writes_16_bit_png_and_refuses_to_overwrite() {
     let d = tempfile::tempdir().unwrap();
     let i = d.path().join("p.png");
