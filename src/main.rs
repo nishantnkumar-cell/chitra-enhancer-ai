@@ -117,13 +117,35 @@ fn main() {
     }
 }
 
-/// `chitra-enhance models list | get [name...] | runtime`
+/// Checks that a model file can be used and says what it is.
+#[cfg(feature = "onnx")]
+fn check_model(p: &std::path::Path) -> Result<String> {
+    println!("Checking {} ...", p.display());
+    Ok(chitra_enhance::onnx::inspect(p)
+        .with_context(|| format!("{} cannot be used as a model", p.display()))?
+        .describe())
+}
+
+#[cfg(not(feature = "onnx"))]
+fn check_model(_: &std::path::Path) -> Result<String> {
+    bail!("checking a model needs a build with `--features onnx`")
+}
+
+/// `chitra-enhance models list | get [name...] | add <file> | remove <name> | runtime`
 fn models_command(args: &[String]) -> Result<()> {
     use chitra_enhance::models;
     let dir = chitra_enhance::job::models_dir().context("cannot work out where models are kept")?;
     match args.first().map(String::as_str) {
         Some("list") | None => {
             println!("Models folder: {}", dir.display());
+            let mine: Vec<_> = models::library(&dir)
+                .into_iter()
+                .filter(|p| {
+                    !models::MODELS
+                        .iter()
+                        .any(|m| p.file_name().is_some_and(|n| n == m.file))
+                })
+                .collect();
             for m in models::MODELS {
                 let state = if models::is_installed(&dir, m) {
                     "installed"
@@ -137,7 +159,16 @@ fn models_command(args: &[String]) -> Result<()> {
                     m.what
                 );
             }
+            if !mine.is_empty() {
+                println!("\nYour own models:");
+                for p in &mine {
+                    println!("  {}", p.display());
+                }
+            }
             println!("\nFetch with: chitra-enhance models get [all | part of a name]");
+            println!(
+                "Add your own: chitra-enhance models add <file.onnx>  (remove: models remove <name>)"
+            );
             Ok(())
         }
         Some("get") => {
@@ -156,6 +187,44 @@ fn models_command(args: &[String]) -> Result<()> {
             );
             Ok(())
         }
+        Some("add") => {
+            let force = args.iter().any(|a| a == "--force");
+            let mut rest = args[1..].iter().filter(|a| !a.starts_with("--"));
+            let src = PathBuf::from(
+                rest.next()
+                    .context("usage: models add <file.onnx> [name] [--force]")?,
+            );
+            if !src.is_file() {
+                bail!("{} is not a file", src.display());
+            }
+            let name = match rest.next() {
+                Some(n) => n.clone(),
+                None => src
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            };
+            let kind = check_model(&src)?;
+            let dest = models::add_to_library(&dir, &src, &name, force)?;
+            println!(
+                "Added {} - {}.\nUse it with {} {}",
+                dest.display(),
+                kind,
+                if kind.contains("denoiser") {
+                    "--temporal-model"
+                } else {
+                    "--model"
+                },
+                dest.display()
+            );
+            Ok(())
+        }
+        Some("remove") => {
+            let name = args.get(1).context("usage: models remove <name>")?;
+            let p = models::remove_custom(&dir, name)?;
+            println!("Removed {}", p.display());
+            Ok(())
+        }
         Some("runtime") => {
             match models::find_runtime() {
                 Some(p) => println!("ONNX Runtime found: {}", p.display()),
@@ -163,7 +232,9 @@ fn models_command(args: &[String]) -> Result<()> {
             }
             Ok(())
         }
-        Some(other) => bail!("unknown models command \"{other}\"; use list, get or runtime"),
+        Some(other) => {
+            bail!("unknown models command \"{other}\"; use list, get, add, remove or runtime")
+        }
     }
 }
 
