@@ -63,6 +63,11 @@ struct App {
     query_note: String,
     /// Every .onnx in the models folder.
     library: Vec<PathBuf>,
+    /// A file or disc given on the command line, opened on the first frame.
+    open_first: Option<PathBuf>,
+    /// For development: save a picture of the window here, then close.
+    screenshot: Option<PathBuf>,
+    frames: u32,
 }
 
 fn cli_path() -> PathBuf {
@@ -145,6 +150,9 @@ impl App {
             titles: vec![],
             report: None,
             query_note: String::new(),
+            open_first: std::env::args_os().nth(1).map(PathBuf::from),
+            screenshot: std::env::var_os("CHITRA_GUI_SCREENSHOT").map(PathBuf::from),
+            frames: 0,
             library: job::models_dir()
                 .map(|d| chitra_enhance::models::library(&d))
                 .unwrap_or_default(),
@@ -352,6 +360,36 @@ impl App {
         }
     }
 
+    /// Development aid (`CHITRA_GUI_SCREENSHOT=file.png`): once any analysis
+    /// has finished, saves what the window shows and closes it.
+    fn take_screenshot(&mut self, ctx: &egui::Context) {
+        if self.screenshot.is_none() {
+            return;
+        }
+        ctx.request_repaint();
+        self.take_answer();
+        if self.query_rx.is_some() {
+            return;
+        }
+        self.frames += 1;
+        if self.frames != 20 {
+            return;
+        }
+        let Some(path) = self.screenshot.clone() else {
+            return;
+        };
+        let close = ctx.clone();
+        ctx.request_screenshot(move |img: std::sync::Arc<egui::ColorImage>| {
+            let (w, h) = (img.size[0] as u32, img.size[1] as u32);
+            let bytes: Vec<u8> = img.pixels.iter().flat_map(|p| p.to_array()).collect();
+            if let Err(e) = image::save_buffer(&path, &bytes, w, h, image::ColorType::Rgba8) {
+                eprintln!("could not save the picture: {e}");
+            }
+            close.send_viewport_cmd(egui::ViewportCommand::Close);
+            close.request_repaint();
+        });
+    }
+
     fn stop(&mut self) {
         if let Some(r) = &mut self.run {
             let _ = r.child.kill();
@@ -430,6 +468,16 @@ fn setup_style(ctx: &egui::Context) {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        if let Some(p) = self.open_first.take() {
+            let p = std::path::absolute(&p).unwrap_or(p);
+            let p_input = p.clone();
+            self.choose(ctx, p);
+            // (A disc is busy listing its titles; analysing would replace that.)
+            if self.screenshot.is_some() && !job::is_photo(&p_input) && self.query_rx.is_none() {
+                self.ask(ctx, false);
+            }
+        }
+        self.take_screenshot(ctx);
         self.poll();
         if self.run.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
@@ -576,6 +624,12 @@ impl eframe::App for App {
                                         ui.selectable_value(&mut self.s.deinterlace, d.into(), d);
                                     }
                                 });
+                            if self.s.deinterlace != "off" {
+                                ui.checkbox(
+                                    &mut self.s.double_rate,
+                                    "Keep both half-pictures (smoother, 2x time)",
+                                );
+                            }
                             egui::ComboBox::from_label("Video format")
                                 .selected_text(self.s.codec.clone())
                                 .show_ui(ui, |ui| {
@@ -589,7 +643,7 @@ impl eframe::App for App {
                                 ui.checkbox(&mut on, "Film grain");
                                 if on {
                                     let v = g.get_or_insert(3.0);
-                                    ui.add(egui::Slider::new(v, 0.0..=30.0));
+                                    ui.add(egui::Slider::new(v, 0.0..=30.0).integer());
                                 }
                             });
                             self.s.grain = on.then(|| g.unwrap_or(3.0) as u32);
@@ -641,10 +695,6 @@ impl eframe::App for App {
                                     }
                                     self.s.chunk_secs = on.then(|| chunk.unwrap_or(30));
                                 });
-                                ui.checkbox(
-                                    &mut self.s.double_rate,
-                                    "Interlaced: keep both fields (smoother, 2× frames)",
-                                );
                             });
                             ui.checkbox(&mut self.restart, "Start over (ignore unfinished work)");
                         }
@@ -697,12 +747,19 @@ impl eframe::App for App {
                     {
                         self.choose(ctx, p);
                     }
-                    ui.label(RichText::new(self.s.input.display().to_string()).monospace());
                 });
+                if !self.s.input.as_os_str().is_empty() {
+                    let full = self.s.input.display().to_string();
+                    ui.add(egui::Label::new(RichText::new(&full).monospace()).truncate())
+                        .on_hover_text(full);
+                }
                 ui.horizontal(|ui| {
                     ui.label("Save as");
                     let mut text = self.s.output.display().to_string();
-                    if ui.text_edit_singleline(&mut text).changed() {
+                    if ui
+                        .add(egui::TextEdit::singleline(&mut text).desired_width(f32::INFINITY))
+                        .changed()
+                    {
                         self.s.output = PathBuf::from(text);
                     }
                 });
@@ -769,11 +826,8 @@ impl eframe::App for App {
 
             let (d, t) = self.progress;
             let frac = if t > 0 { d as f32 / t as f32 } else { 0.0 };
-            ui.add(
-                egui::ProgressBar::new(frac)
-                    .fill(TEAL)
-                    .show_percentage()
-                    .text(match &self.phase {
+            let bar = egui::ProgressBar::new(frac).fill(TEAL);
+            let status = match &self.phase {
                         Phase::Running if t > 0 => {
                             let secs = self.started.map_or(0.0, |s| s.elapsed().as_secs_f32());
                             let eta = if d > 0 {
@@ -788,8 +842,12 @@ impl eframe::App for App {
                         Phase::Stopped => "Stopped — Start continues where it left off".into(),
                         Phase::Failed(_) => "Failed".into(),
                         Phase::Idle => "Ready".into(),
-                    }),
-            );
+            };
+            if t > 0 {
+                ui.add(bar.text(format!("{:.0}%  {status}", frac * 100.0)));
+            } else {
+                ui.label(status);
+            }
             if let Phase::Failed(m) = &self.phase {
                 ui.colored_label(Color32::from_rgb(0xff, 0x7a, 0x70), m);
             }
@@ -797,16 +855,21 @@ impl eframe::App for App {
             ui.horizontal(|ui| {
                 let problem = self.s.problem();
                 if running {
-                    if ui.button("■ Stop").clicked() {
+                    if ui.button("Stop").clicked() {
                         self.stop();
                     }
                 } else {
                     let label = if self.phase == Phase::Stopped {
-                        "▶ Continue"
+                        "Continue"
                     } else {
-                        "▶ Start"
+                        "Start"
                     };
-                    let b = ui.add_enabled(problem.is_none(), egui::Button::new(label));
+                    let b = ui.add_enabled(
+                        problem.is_none(),
+                        egui::Button::new(RichText::new(label).strong().color(Color32::BLACK))
+                            .fill(TEAL)
+                            .min_size(egui::vec2(90.0, 0.0)),
+                    );
                     if b.clicked() {
                         self.start(ctx, false);
                     }
@@ -863,7 +926,9 @@ impl eframe::App for App {
                     open_file(c);
                 }
             }
-            ui.label(RichText::new("Log").strong());
+            if !self.log.is_empty() {
+                ui.label(RichText::new("Log").strong());
+            }
             egui::ScrollArea::vertical()
                 .stick_to_bottom(true)
                 .show(ui, |ui| {

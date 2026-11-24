@@ -305,7 +305,7 @@ pub fn recommend(info: &VideoInfo, measures: &[Measure], have: Available) -> Rep
             };
             let (su, sv) = (u.round() as i32, v.round() as i32);
             notes.push(format!(
-                "Whitish areas lean {tint}: possibly a colour cast, though a sky counts as whitish too, so it is not applied. To try correcting it: --colour-shift {su}:{sv} (check with --preview)."
+                "Whitish areas lean {tint}: possibly a colour cast, though a sky counts as whitish too, so it is not applied. To try it: --colour-shift {su}:{sv} (in the window, \"Correct a colour cast\"), then check a preview."
             ));
         }
     }
