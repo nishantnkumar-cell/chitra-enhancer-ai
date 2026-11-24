@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 
 use chitra_enhance::engine::{Engine, Lanczos, Rescaled};
@@ -117,7 +117,61 @@ fn main() {
     }
 }
 
+/// `chitra-enhance models list | get [name...] | runtime`
+fn models_command(args: &[String]) -> Result<()> {
+    use chitra_enhance::models;
+    let dir = chitra_enhance::job::models_dir().context("cannot work out where models are kept")?;
+    match args.first().map(String::as_str) {
+        Some("list") | None => {
+            println!("Models folder: {}", dir.display());
+            for m in models::MODELS {
+                let state = if models::is_installed(&dir, m) {
+                    "installed"
+                } else {
+                    "not installed"
+                };
+                println!(
+                    "  {:34} {:>5.1} MB  {state}  - {}",
+                    m.file,
+                    m.bytes as f64 / 1e6,
+                    m.what
+                );
+            }
+            println!("\nFetch with: chitra-enhance models get [all | part of a name]");
+            Ok(())
+        }
+        Some("get") => {
+            for m in models::select(&args[1..])? {
+                if models::is_installed(&dir, m) {
+                    println!("{} is already here", m.file);
+                    continue;
+                }
+                print!("Downloading {} ... ", m.file);
+                std::io::Write::flush(&mut std::io::stdout())?;
+                let p = models::fetch(&dir, m)?;
+                println!("ok, checksum verified: {}", p.display());
+            }
+            println!(
+                "Models are licensed by their authors: see docs/MODEL_LICENCES.md in the repository."
+            );
+            Ok(())
+        }
+        Some("runtime") => {
+            match models::find_runtime() {
+                Some(p) => println!("ONNX Runtime found: {}", p.display()),
+                None => println!("{}", models::RUNTIME_HELP),
+            }
+            Ok(())
+        }
+        Some(other) => bail!("unknown models command \"{other}\"; use list, get or runtime"),
+    }
+}
+
 fn real_main() -> Result<()> {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("models") {
+        return models_command(&argv[1..]);
+    }
     let a = Args::parse();
     if !a.input.is_file() {
         bail!("{} is not a file", a.input.display());
