@@ -77,7 +77,7 @@ fn build_session(env: &Environment, path: &Path, device: Device) -> Result<(Sess
             let mut b = Session::builder(env)?
                 .with_execution_providers([p.error_on_failure()])
                 .map_err(|e| -> ort::Error { e.into() })?;
-            Ok(b.commit_from_file(path)?)
+            b.commit_from_file(path).map_err(Into::into)
         })();
         match built {
             Ok(s) => return Ok((s, name.to_string())),
@@ -194,9 +194,8 @@ impl OnnxEngine {
             let scale = self.scale;
             let mut oom = false;
             let r = upscale_tiled(src, scale, tile, overlap_for(tile), |t| {
-                self.run_tile(t).map_err(|e| {
+                self.run_tile(t).inspect_err(|e| {
                     oom = e.downcast_ref::<ort::Error>().is_some_and(is_out_of_memory);
-                    e
                 })
             });
             match r {
