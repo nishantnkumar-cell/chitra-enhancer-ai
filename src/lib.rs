@@ -2,5 +2,8 @@
 
 pub mod engine;
 pub mod ffmpeg;
+pub mod infer;
+#[cfg(feature = "onnx")]
+pub mod onnx;
 pub mod tiler;
 pub mod video;

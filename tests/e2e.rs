@@ -154,3 +154,38 @@ fn refuses_the_input_as_output_and_a_missing_file() {
         .unwrap();
     assert!(!r.status.success());
 }
+
+/// Runs a real ONNX model when `ORT_DYLIB_PATH` and `CHITRA_TEST_MODEL` (a 2x
+/// model) are set and the binary was built with `--features onnx`.
+#[cfg(feature = "onnx")]
+#[test]
+fn an_onnx_model_doubles_the_frame_size() {
+    let (Some(_), Some(model)) = (
+        std::env::var_os("ORT_DYLIB_PATH"),
+        std::env::var_os("CHITRA_TEST_MODEL"),
+    ) else {
+        eprintln!("no ONNX Runtime/model configured: skipped");
+        return;
+    };
+    if !have_ffmpeg() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let (i, o) = (d.path().join("in.mp4"), d.path().join("out.mkv"));
+    make_clip(&i);
+    let r = bin()
+        .args(["-i", i.to_str().unwrap(), "-o", o.to_str().unwrap()])
+        .args(["--model", model.to_str().unwrap(), "--device", "cpu"])
+        .args([
+            "--codec",
+            "h264",
+            "--preset",
+            "ultrafast",
+            "--denoise",
+            "off",
+        ])
+        .output()
+        .unwrap();
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    assert_eq!(frames(&o).0, "320,240,75");
+}

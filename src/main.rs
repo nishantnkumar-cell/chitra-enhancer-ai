@@ -18,9 +18,20 @@ struct Args {
     /// Where to write the result (never the input). .mp4, .mkv or .mov.
     #[arg(short, long)]
     output: PathBuf,
-    /// How many times larger the picture becomes.
+    /// How many times larger the picture becomes (without --model).
     #[arg(long, default_value_t = 2)]
     scale: usize,
+    /// An ONNX upscaling model (FP16 or FP32, RGB in 0..1, NCHW). Its own scale
+    /// is used. Needs ORT_DYLIB_PATH and a build with `--features onnx`.
+    #[arg(long)]
+    model: Option<PathBuf>,
+    /// Which processor runs the model.
+    #[cfg(feature = "onnx")]
+    #[arg(long, value_enum, default_value_t = chitra_enhance::onnx::Device::Auto)]
+    device: chitra_enhance::onnx::Device,
+    /// Graphics memory the model may use, in GB (sets the tile size).
+    #[arg(long, default_value_t = 8)]
+    vram_budget: usize,
     #[arg(long, value_enum, default_value_t = Denoise::Medium)]
     denoise: Denoise,
     #[arg(long, value_enum, default_value_t = Deinterlace::Auto)]
@@ -106,7 +117,19 @@ fn real_main() -> Result<()> {
         keep_work: a.keep_work,
         stop_after_chunks: a.stop_after_chunks,
     };
-    let mut engine: Box<dyn Engine> = Box::new(Lanczos::new(a.scale));
+    let mut engine: Box<dyn Engine> = match &a.model {
+        #[cfg(feature = "onnx")]
+        Some(m) => Box::new(chitra_enhance::onnx::OnnxEngine::load(
+            m,
+            a.device,
+            a.vram_budget * 1024,
+        )?),
+        #[cfg(not(feature = "onnx"))]
+        Some(_) => bail!(
+            "this build has no AI model support: rebuild with `cargo build --release --features onnx`"
+        ),
+        None => Box::new(Lanczos::new(a.scale)),
+    };
     eprintln!("Filters: {}", o.decode_filters(&info));
     eprintln!("Engine: {}", engine.describe());
     if a.dry_run {
