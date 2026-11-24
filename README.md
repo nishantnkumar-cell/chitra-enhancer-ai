@@ -9,7 +9,9 @@ chitra-enhance -i tape.avi -o restored.mp4 --model realesr-2x-fp16.onnx
 
 ## What it does to a video
 
-1. **Deinterlaces** tape-style fields (`bwdif`) when the file says it is interlaced.
+1. **Deinterlaces** tape-style fields (`bwdif`) when the file is interlaced. Captures
+   often say nothing in their header, so the frame flags and then the pictures
+   themselves are checked.
 2. **Removes noise** over space and time (`hqdn3d`; `--denoise light|medium|strong|off`), or,
    far better on camcorder grain, with a five-frame AI denoiser (`--temporal-model`, below).
 3. Makes pixels **square** (DV 720x480 becomes 640x480).

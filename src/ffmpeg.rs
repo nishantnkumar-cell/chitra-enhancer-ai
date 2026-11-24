@@ -193,7 +193,92 @@ pub fn probe(tools: &Tools, input: &Path) -> Result<VideoInfo> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    parse_probe(&String::from_utf8_lossy(&out.stdout))
+    let json = String::from_utf8_lossy(&out.stdout);
+    let mut info = parse_probe(&json)?;
+    // Captures often leave the header silent about fields, even though every
+    // frame is interlaced; ask the frames, then look at the pictures.
+    if !field_order_declared(&json) {
+        info.interlaced = detect_interlace(tools, input);
+    }
+    Ok(info)
+}
+
+/// True when the video's header says what its field order is (or that it has none).
+fn field_order_declared(json: &str) -> bool {
+    serde_json::from_str::<Value>(json)
+        .ok()
+        .and_then(|v| {
+            v["streams"]
+                .as_array()?
+                .iter()
+                .find(|s| s["codec_type"] == "video")?["field_order"]
+                .as_str()
+                .map(|f| matches!(f, "tt" | "bb" | "tb" | "bt" | "progressive"))
+        })
+        .unwrap_or(false)
+}
+
+/// Most of the first frames flagged as interlaced by the decoder.
+fn mostly_flagged(csv: &str) -> bool {
+    let flags: Vec<bool> = csv
+        .lines()
+        .filter_map(|l| match l.split(',').next()?.trim() {
+            "1" => Some(true),
+            "0" => Some(false),
+            _ => None,
+        })
+        .collect();
+    !flags.is_empty() && flags.iter().filter(|&&f| f).count() * 2 > flags.len()
+}
+
+/// Reads ffmpeg's `idet` summary: interlaced when combed frames clearly
+/// outnumber progressive ones **and one field order dominates** (real tape has
+/// one; fine moving detail in progressive video fools `idet` both ways at once).
+/// Static scenes are "undetermined" and not counted.
+fn combed(log: &str) -> bool {
+    let count = |line: &str, key: &str| -> u64 {
+        line.split_once(key)
+            .and_then(|(_, rest)| rest.split_whitespace().next()?.parse().ok())
+            .unwrap_or(0)
+    };
+    log.lines()
+        .filter(|l| l.contains("Multi frame detection:"))
+        .map(|l| {
+            let (t, b) = (count(l, "TFF:"), count(l, "BFF:"));
+            (t.max(b), t.min(b), count(l, "Progressive:"))
+        })
+        .max_by_key(|&(a, b, p)| a + b + p)
+        .is_some_and(|(main, other, progressive)| {
+            main >= 10 && main >= 4 * other && main > 2 * progressive
+        })
+}
+
+fn detect_interlace(tools: &Tools, input: &Path) -> bool {
+    let flags = Command::new(&tools.ffprobe)
+        .args(["-v", "error", "-select_streams", "v:0"])
+        .args(["-show_entries", "frame=interlaced_frame", "-of", "csv=p=0"])
+        .args(["-read_intervals", "%+#60"])
+        .arg(input)
+        .output();
+    if flags.is_ok_and(|o| mostly_flagged(&String::from_utf8_lossy(&o.stdout))) {
+        return true;
+    }
+    Command::new(&tools.ffmpeg)
+        .args(["-nostdin", "-v", "info", "-i"])
+        .arg(input)
+        .args([
+            "-an",
+            "-sn",
+            "-vf",
+            "idet",
+            "-frames:v",
+            "300",
+            "-f",
+            "null",
+            "-",
+        ])
+        .output()
+        .is_ok_and(|o| combed(&String::from_utf8_lossy(&o.stderr)))
 }
 
 #[cfg(test)]
@@ -267,6 +352,34 @@ mod tests {
         ] {
             assert!(parse_probe(&with(w, h, f, d, sar)).is_err(), "{why}");
         }
+    }
+
+    #[test]
+    fn a_silent_header_is_told_apart_from_a_declared_one() {
+        let with = |f: &str| format!(r#"{{"streams":[{{"codec_type":"video"{f}}}]}}"#);
+        assert!(field_order_declared(&with(r#","field_order":"tt""#)));
+        assert!(field_order_declared(&with(
+            r#","field_order":"progressive""#
+        )));
+        assert!(!field_order_declared(&with(r#","field_order":"unknown""#)));
+        assert!(!field_order_declared(&with("")));
+    }
+
+    #[test]
+    fn frame_flags_and_idet_output_are_read() {
+        assert!(mostly_flagged("1\n1\n0\n1,\n"));
+        assert!(!mostly_flagged("0\n0\n1\n"));
+        assert!(!mostly_flagged(""));
+        let log = "[idet] Multi frame detection: TFF:     0 BFF:     0 Progressive:     0 Undetermined:     0
+[idet] Multi frame detection: TFF:   799 BFF:     4 Progressive:     0 Undetermined:     1";
+        assert!(combed(log));
+        assert!(!combed(
+            "Multi frame detection: TFF: 3 BFF: 2 Progressive: 200 Undetermined: 9"
+        ));
+        assert!(!combed(
+            "Multi frame detection: TFF: 4 BFF: 0 Progressive: 0 Undetermined: 900"
+        ));
+        assert!(!combed(""));
     }
 
     #[test]

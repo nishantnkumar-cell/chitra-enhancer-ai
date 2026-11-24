@@ -454,6 +454,36 @@ fn an_enormous_enlargement_is_refused_up_front() {
     assert!(!o.exists());
 }
 
+/// Interlaced pictures in a file whose header says nothing about fields (as
+/// many captures do) are still recognised; progressive ones are left alone.
+#[test]
+fn interlacing_is_found_even_when_the_header_is_silent() {
+    use chitra_enhance::ffmpeg;
+    if !have_ffmpeg() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let tools = ffmpeg::Tools::locate(None).unwrap();
+    let make = |name: &str, vf: &str| {
+        let p = d.path().join(name);
+        let st = Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("testsrc2=size=320x240:rate=50:duration=3")
+            .args(["-vf", vf, "-c:v", "mjpeg", "-q:v", "2"])
+            .arg(&p)
+            .status()
+            .unwrap();
+        assert!(st.success());
+        p
+    };
+    // `setfield=prog` removes the flags, so only the picture shows the combing.
+    // In AVI the header says nothing about fields.
+    let woven = make("woven.avi", "interlace,setfield=prog");
+    let flat = make("flat.avi", "fps=25");
+    assert!(ffmpeg::probe(&tools, &woven).unwrap().interlaced);
+    assert!(!ffmpeg::probe(&tools, &flat).unwrap().interlaced);
+}
+
 #[test]
 fn the_models_command_lists_and_refuses_unknown_names_without_touching_the_network() {
     let d = tempfile::tempdir().unwrap();
