@@ -367,6 +367,59 @@ fn the_models_command_lists_and_refuses_unknown_names_without_touching_the_netwo
 }
 
 #[test]
+fn a_folder_is_a_batch_that_skips_finished_files_and_survives_a_bad_one() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let (inp, out) = (d.path().join("tapes"), d.path().join("done"));
+    std::fs::create_dir(&inp).unwrap();
+    make_clip(&inp.join("a.mp4"));
+    image::RgbImage::from_fn(30, 20, |x, y| {
+        image::Rgb([(x * 8) as u8, (y * 12) as u8, 90])
+    })
+    .save(inp.join("b.png"))
+    .unwrap();
+    std::fs::write(inp.join("notes.txt"), "not media").unwrap();
+    std::fs::write(inp.join("broken.avi"), "not a video").unwrap();
+    let run = || {
+        bin()
+            .args(["-i", inp.to_str().unwrap(), "-o", out.to_str().unwrap()])
+            .args(["--scale", "1", "--denoise", "off", "--codec", "h264"])
+            .args(["--preset", "ultrafast", "--grain", "0"])
+            .output()
+            .unwrap()
+    };
+    let r = run();
+    let err = String::from_utf8_lossy(&r.stderr);
+    assert!(
+        !r.status.success(),
+        "the broken file makes the batch fail overall"
+    );
+    assert!(
+        err.contains("FAILED") && err.contains("broken.avi"),
+        "{err}"
+    );
+    assert!(err.contains("2 done") || err.contains("2 done,"), "{err}");
+    assert_eq!(frames(&out.join("a-enhanced.mp4")).0, "160,120,75");
+    assert!(out.join("b-enhanced.jxl").is_file());
+    assert!(!out.join("notes-enhanced.mp4").exists());
+    // Without the bad file, a second run only skips.
+    std::fs::remove_file(inp.join("broken.avi")).unwrap();
+    let r = run();
+    let err = String::from_utf8_lossy(&r.stderr);
+    assert!(r.status.success(), "{err}");
+    assert_eq!(err.matches("already done").count(), 2, "{err}");
+    // The output folder may not be the input folder.
+    let same = bin()
+        .args(["-i", inp.to_str().unwrap(), "-o", inp.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!same.status.success());
+    assert!(String::from_utf8_lossy(&same.stderr).contains("must not be the input folder"));
+}
+
+#[test]
 fn photo_mode_writes_16_bit_png_and_refuses_to_overwrite() {
     let d = tempfile::tempdir().unwrap();
     let i = d.path().join("p.png");

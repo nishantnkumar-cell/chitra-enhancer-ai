@@ -76,9 +76,42 @@ pub fn is_photo(p: &Path) -> bool {
     )
 }
 
+pub fn is_video(p: &Path) -> bool {
+    matches!(
+        p.extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .as_deref(),
+        Some(
+            "mp4"
+                | "m4v"
+                | "mov"
+                | "mkv"
+                | "avi"
+                | "mpg"
+                | "mpeg"
+                | "ts"
+                | "m2ts"
+                | "mts"
+                | "wmv"
+                | "flv"
+                | "webm"
+                | "3gp"
+                | "dv"
+                | "vob"
+        )
+    )
+}
+
 /// `clip.avi` -> `clip-enhanced.mp4` next to it; `photo.jpg` -> `photo-enhanced.jxl`.
 /// Never the input itself.
 pub fn default_output(input: &Path) -> PathBuf {
+    if input.is_dir() {
+        // A whole folder: results go into a folder next to it.
+        return input.with_file_name(format!(
+            "{}-enhanced",
+            input.file_name().unwrap_or_default().to_string_lossy()
+        ));
+    }
     let stem = input.file_stem().unwrap_or_default().to_string_lossy();
     let ext = if is_photo(input) { "jxl" } else { "mp4" };
     input.with_file_name(format!("{stem}-enhanced.{ext}"))
@@ -97,14 +130,17 @@ impl Settings {
         if self.input.as_os_str().is_empty() {
             return Some("Choose a video or photo first.".into());
         }
-        if !self.input.is_file() {
-            return Some("The chosen file does not exist.".into());
+        if !self.input.is_file() && !self.input.is_dir() {
+            return Some("The chosen file or folder does not exist.".into());
         }
         if self.output.as_os_str().is_empty() {
             return Some("Choose where to save the result.".into());
         }
         if self.output == self.input {
             return Some("The result must not overwrite the original.".into());
+        }
+        if self.output.is_file() && self.input.is_dir() {
+            return Some("A folder needs a folder to save into, not a file.".into());
         }
         if self.output.exists() && !self.overwrite && is_photo(&self.input) {
             return Some("The result file exists: tick \"Replace\" or pick another name.".into());
@@ -162,7 +198,9 @@ impl Settings {
         if let Some(t) = self.tile {
             a.extend(["--tile-size".into(), t.to_string()]);
         }
-        if is_photo(&self.input) {
+        // A folder gets both sets of options; each file uses the ones that fit it.
+        let folder = self.input.is_dir();
+        if is_photo(&self.input) || folder {
             if let Some(m) = &self.model_compressed {
                 a.extend(["--model-compressed".into(), s(m)]);
             }
@@ -170,7 +208,8 @@ impl Settings {
             if self.overwrite {
                 a.push("--force".into());
             }
-        } else {
+        }
+        if !is_photo(&self.input) {
             let denoise = if self.five_frame {
                 "off"
             } else {
@@ -281,6 +320,27 @@ mod tests {
     }
 
     #[test]
+    fn folders_are_batches_with_both_option_sets() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Settings {
+            input: d.path().to_path_buf(),
+            output: d.path().join("out"),
+            jxl_distance: 0.5,
+            ..Settings::default()
+        };
+        let a = s.args();
+        assert!(a.contains(&"--jxl-distance".to_string()), "photo options");
+        assert!(a.contains(&"--codec".to_string()), "video options");
+        assert!(
+            default_output(d.path())
+                .to_string_lossy()
+                .ends_with("-enhanced")
+        );
+        assert!(is_video(Path::new("a.MKV")) && is_video(Path::new("t.dv")));
+        assert!(!is_video(Path::new("a.jpg")) && !is_video(Path::new("a.txt")));
+    }
+
+    #[test]
     fn previews_have_their_own_name() {
         let p = preview_output(Path::new("/v/old tape.avi"));
         assert_eq!(p, Path::new("/v/old tape-preview.mp4"));
@@ -362,6 +422,10 @@ mod tests {
         assert!(s.problem().unwrap().contains("Choose a video"));
         s.input = d.path().join("missing.avi");
         assert!(s.problem().unwrap().contains("does not exist"));
+        s.input = d.path().to_path_buf();
+        s.output = d.path().join("out");
+        assert_eq!(s.problem(), None, "a folder is a valid input");
+        s.output = PathBuf::new();
         s.input = f.clone();
         assert!(s.problem().unwrap().contains("where to save"));
         s.output = f.clone();
