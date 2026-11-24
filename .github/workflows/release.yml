@@ -57,7 +57,6 @@ jobs:
   draft-release:
     name: draft release
     needs: bundle
-    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -66,7 +65,14 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Check the bundles
+        run: |
+          cd dist
+          ls -l
+          test "$(ls *.tar.gz *.zip | wc -l)" -eq 3
+          for f in *.sha256; do sha256sum -c "$f"; done
       - name: Create the draft
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
