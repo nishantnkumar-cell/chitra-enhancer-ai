@@ -183,6 +183,7 @@ fn real_main() -> Result<()> {
     if let Some(t) = a.scale {
         engine = Rescaled::wrap(engine, t);
     }
+    #[cfg_attr(not(feature = "onnx"), allow(unused_variables))]
     let sigma = match a.temporal_sigma {
         Some(v) => v,
         None if a.temporal_model.is_some() || a.dry_run => {
