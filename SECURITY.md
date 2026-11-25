@@ -17,6 +17,13 @@ files you ask for. It treats these as **untrusted** and bounds them:
   decoding is done by the `image` crate and by ffmpeg, which are fuzzed upstream,
   and the JPEG header reader and decoder wrapper are fuzzed here (`fuzz/`).
   Enlarged frames are capped at 100 million pixels (photos 120 million).
+- **DVD images and drives.** Raw sectors are walked with bounds checks (fuzzed)
+  to refuse copy-protected discs; the check samples sectors, so it is a guard
+  against ordinary protected discs, not a proof about a crafted one. The disc
+  itself is parsed by ffmpeg with libdvdread. Titles are limited to 99 and their
+  lengths bounded.
+- **Printed commands.** File names are quoted for the shell (PowerShell on
+  Windows), so pasting a suggested command cannot run anything hidden in a name.
 - **ffmpeg / ffprobe.** Started as separate programs with argument lists (never a
   shell); paths are made absolute so a name starting with `-` is not an option.
 - **Downloaded model files.** Fetched over HTTPS only, size-limited, and checked

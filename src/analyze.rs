@@ -17,6 +17,11 @@ pub const SAMPLES: usize = 12;
 /// Consecutive frames read at each place.
 pub const FRAMES_PER_SAMPLE: usize = 12;
 
+/// Frames above this size are sampled more sparingly, to bound memory.
+const LARGE_FRAME: usize = 3840 * 2160;
+/// Enough edges to know the typical one; more only costs memory and time.
+const MOST_PROFILES: usize = 20_000;
+
 /// One decoded frame (4:2:0).
 pub struct Frame {
     pub y: Vec<u8>,
@@ -223,7 +228,7 @@ fn edge_profiles(y: &[u8], w: usize, h: usize, out: &mut Vec<[f32; PROFILE]>) {
                 };
                 let (lo, lsd) = flat(&seg[..4]);
                 let (hi, hsd) = flat(&seg[PROFILE - 4..]);
-                if lsd < 4.0 && hsd < 4.0 && hi - lo > 40.0 {
+                if lsd < 4.0 && hsd < 4.0 && hi - lo > 40.0 && out.len() < MOST_PROFILES {
                     out.push(seg.map(|v| (v - lo) / (hi - lo)));
                 }
             }
@@ -545,6 +550,15 @@ pub fn positions(seconds: f64) -> Vec<f64> {
         .collect()
 }
 
+/// How many consecutive frames to read at each place.
+fn frames_for(w: usize, h: usize) -> usize {
+    if w * h > LARGE_FRAME {
+        4
+    } else {
+        FRAMES_PER_SAMPLE
+    }
+}
+
 /// Reads consecutive frames at `start` seconds, deinterlaced if asked.
 fn read_sample(
     tools: &Tools,
@@ -571,7 +585,7 @@ fn read_sample(
         ])
         .arg(file)
         .args(["-an", "-sn", "-vf", &crop, "-frames:v"])
-        .arg(FRAMES_PER_SAMPLE.to_string())
+        .arg(frames_for(w, h).to_string())
         .args(["-f", "rawvideo", "-pix_fmt", "yuv420p", "-"])
         .stderr(Stdio::null())
         .output()
@@ -850,6 +864,31 @@ mod tests {
                 .dehalo,
             0
         );
+    }
+
+    #[test]
+    fn large_video_and_busy_pictures_use_bounded_memory() {
+        assert_eq!(frames_for(720, 576), FRAMES_PER_SAMPLE);
+        assert_eq!(frames_for(7680, 4320), 4);
+        let mut line = [60u8; W];
+        line[80..].fill(180);
+        let picture = line.repeat(H);
+        let mut v = vec![[0.0; PROFILE]; MOST_PROFILES];
+        edge_profiles(&picture, W, H, &mut v);
+        assert_eq!(v.len(), MOST_PROFILES);
+    }
+
+    #[test]
+    fn tiny_pictures_are_measured_without_failing() {
+        for (w, h) in [(16, 16), (18, 64), (64, 18), (40, 40)] {
+            let f = || Frame {
+                y: (0..w * h).map(|i| (i * 7) as u8).collect(),
+                u: (0..w * h / 4).map(|i| (i * 13) as u8).collect(),
+                v: (0..w * h / 4).map(|i| (i * 5) as u8).collect(),
+            };
+            let m = measure(&[f(), f(), f()], w, h);
+            let _ = recommend(&info(720, 576, false), &[m], ALL);
+        }
     }
 
     #[test]

@@ -520,6 +520,23 @@ fn analyze_suggests_settings_that_run_and_changes_nothing() {
         1,
         "nothing new written"
     );
+    // The command it prints really runs, however the program was built.
+    #[cfg(unix)]
+    {
+        let line = out
+            .lines()
+            .find(|l| l.trim_start().starts_with("chitra-enhance "))
+            .expect(&out);
+        let program = chitra_enhance::job::quote(env!("CARGO_BIN_EXE_chitra-enhance"));
+        let line = line.trim_start().replacen("chitra-enhance", &program, 1);
+        let r = Command::new("sh")
+            .arg("-c")
+            .arg(format!("{line} --dry-run"))
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&r.stderr);
+        assert!(r.status.success(), "{line}\n{err}");
+    }
     // Without --analyze an output is still required.
     let r = bin().args(["-i", i.to_str().unwrap()]).output().unwrap();
     assert!(!r.status.success());

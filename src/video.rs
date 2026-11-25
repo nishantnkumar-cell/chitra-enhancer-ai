@@ -196,12 +196,12 @@ impl Options {
             }
         }
         if let Some((u, v)) = self.colour_shift
-            && (u.abs() > 40 || v.abs() > 40)
+            && [u, v].iter().any(|x| !(-40..=40).contains(x))
         {
             bail!("--colour-shift values must be -40 to 40");
         }
         if let Some((u, v)) = self.colour_align
-            && (u.abs() > 8 || v.abs() > 8)
+            && [u, v].iter().any(|x| !(-8..=8).contains(x))
         {
             bail!("--colour-align values must be -8 to 8");
         }
@@ -931,6 +931,14 @@ mod tests {
         }
         o.colour_align = Some((9, 0));
         assert!(o.check_picture(&dv()).is_err());
+        // The most negative number has no positive twin: it must be refused,
+        // not overflow.
+        o.colour_align = Some((i32::MIN, 0));
+        assert!(o.check_picture(&dv()).is_err());
+        o.colour_align = None;
+        o.colour_shift = Some((0, i32::MIN));
+        assert!(o.check_picture(&dv()).is_err());
+        o.colour_shift = None;
         o.colour_align = Some((0, 0));
         o.dehalo = 0;
         assert!(
