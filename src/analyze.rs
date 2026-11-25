@@ -13,7 +13,7 @@ use crate::ffmpeg::{Tools, VideoInfo};
 use crate::noise::estimate_gray;
 
 /// Places looked at in a long video.
-pub const SAMPLES: usize = 6;
+pub const SAMPLES: usize = 12;
 /// Consecutive frames read at each place.
 pub const FRAMES_PER_SAMPLE: usize = 12;
 
@@ -23,6 +23,11 @@ pub struct Frame {
     pub u: Vec<u8>,
     pub v: Vec<u8>,
 }
+
+/// Colour lines tried each way when lining colour up (one is two picture lines).
+const REACH: usize = 5;
+/// Agreement between colour and brightness edges at each of those shifts.
+pub type Curve = [f64; 2 * REACH + 1];
 
 /// What one sample showed.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -40,6 +45,13 @@ pub struct Measure {
     pub cast: Option<(f32, f32)>,
     /// Share of pixels at or beyond video white.
     pub clipped: f32,
+    /// How well the colour edges agree with the brightness edges when slid by
+    /// each of -5..=5 colour lines (blue, red). Pooled over places later: one
+    /// place alone is too weak to tell a shift.
+    pub colour_fit: Option<[Curve; 2]>,
+    /// How far brightness overshoots across sharp sideways edges (0.3 = 30%),
+    /// if enough clean edges were found.
+    pub overshoot: Option<f32>,
 }
 
 fn median(mut v: Vec<f32>) -> f32 {
@@ -97,6 +109,136 @@ fn black_edges(y: &[u8], w: usize, h: usize) -> [usize; 4] {
     let top = (0..h / 4).take_while(|&r| row(r) < BLACK).count();
     let bottom = (0..h / 4).take_while(|&r| row(h - 1 - r) < BLACK).count();
     [left, right, top, bottom]
+}
+
+/// Slides one colour plane's edges against the brightness edges and scores the
+/// agreement at each shift (index `REACH` is no shift; higher means the colour
+/// sits lower). Only places with a strong colour edge are used.
+fn colour_curve(f: &Frame, w: usize, h: usize, blue: bool) -> Option<Curve> {
+    let (cw, ch) = (w / 2, h / 2);
+    let c = if blue { &f.u } else { &f.v };
+    // Skip the borders, where black edges would dominate.
+    let (x0, x1, y0, y1) = (cw / 16, cw - cw / 16, ch / 16, ch - ch / 16);
+    if x1 <= x0 + 8 || y1 <= y0 + 2 * REACH + 8 {
+        return None;
+    }
+    let luma = |x: usize, y: usize| {
+        let (a, b) = (2 * y * w + 2 * x, (2 * y + 1) * w + 2 * x);
+        let sum = u32::from(f.y[a]) + u32::from(f.y[a + 1]);
+        (sum + u32::from(f.y[b]) + u32::from(f.y[b + 1])) as f32 / 4.0
+    };
+    let colour_step = |x: usize, y: usize| u32::from(c[(y + 1) * cw + x].abs_diff(c[y * cw + x]));
+    let mut steps: Vec<u32> = (y0..y1 - 1)
+        .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+        .map(|(x, y)| colour_step(x, y))
+        .collect();
+    steps.sort_unstable();
+    let strong = steps[steps.len() * 98 / 100].max(4);
+    let mut score = [0.0; 2 * REACH + 1];
+    for (i, slot) in score.iter_mut().enumerate() {
+        let (mut cross, mut cc, mut yy) = (0.0f64, 0.0f64, 0.0f64);
+        for y in y0 + REACH..y1 - 1 - REACH {
+            for x in x0..x1 {
+                // The colour edge `i - REACH` lines below this brightness edge.
+                let step = colour_step(x, y + i - REACH);
+                let col = if step >= strong { f64::from(step) } else { 0.0 };
+                let l = f64::from((luma(x, y + 1) - luma(x, y)).abs());
+                cross += col * l;
+                cc += col * col;
+                yy += l * l;
+            }
+        }
+        if cc > 0.0 && yy > 0.0 {
+            *slot = cross / (cc * yy).sqrt();
+        }
+    }
+    score.iter().any(|&v| v > 0.0).then_some(score)
+}
+
+fn mean_curve(curves: &[Curve]) -> Option<Curve> {
+    (!curves.is_empty()).then(|| {
+        std::array::from_fn(|i| curves.iter().map(|c| c[i]).sum::<f64>() / curves.len() as f64)
+    })
+}
+
+/// Fewer places than this cannot tell a colour shift from chance.
+const PLACES_FOR_COLOUR: usize = 6;
+
+/// How many picture lines the colour sits low, from the curves of all places,
+/// or 0 unless the evidence is clear: the pooled best shift improves agreement
+/// by at least 3% and three places in four agree that it beats leaving it.
+fn pooled_shift(places: &[Curve]) -> f64 {
+    let Some(total) = mean_curve(places) else {
+        return 0.0;
+    };
+    if places.len() < PLACES_FOR_COLOUR {
+        return 0.0;
+    }
+    let best = (0..total.len())
+        .max_by(|&a, &b| total[a].total_cmp(&total[b]))
+        .unwrap_or(REACH);
+    // A best score at the end of the range is not a real peak.
+    if best == 0 || best == total.len() - 1 || best == REACH {
+        return 0.0;
+    }
+    let votes = places.iter().filter(|c| c[best] > c[REACH]).count();
+    if votes * 4 < places.len() * 3 || total[best] < total[REACH] * 1.03 {
+        return 0.0;
+    }
+    let (l, m, r) = (total[best - 1], total[best], total[best + 1]);
+    let curve = l - 2.0 * m + r;
+    let fine = if curve < 0.0 {
+        0.5 * (l - r) / curve
+    } else {
+        0.0
+    };
+    (best as f64 - REACH as f64 + fine) * 2.0
+}
+
+/// Positions kept before an edge's steepest step, and in all.
+const BEFORE: usize = 9;
+const PROFILE: usize = 20;
+
+/// Collects clean, isolated sideways edges (flat on both sides, a big step),
+/// each scaled so that it goes from 0 to 1.
+fn edge_profiles(y: &[u8], w: usize, h: usize, out: &mut Vec<[f32; PROFILE]>) {
+    if w < PROFILE + 16 {
+        return;
+    }
+    for row in (0..h).step_by(2) {
+        let line = &y[row * w..(row + 1) * w];
+        let step = |x: usize| i32::from(line[x + 1]) - i32::from(line[x]);
+        for x in BEFORE + 3..w - (PROFILE - BEFORE) - 4 {
+            for sign in [1i32, -1] {
+                let d = sign * step(x);
+                if d <= 30 || (x - 4..=x + 4).any(|n| sign * step(n) > d) {
+                    continue;
+                }
+                let seg: [f32; PROFILE] =
+                    std::array::from_fn(|i| f32::from(line[x - BEFORE + i]) * sign as f32);
+                let flat = |s: &[f32]| {
+                    let mean = s.iter().sum::<f32>() / s.len() as f32;
+                    let var = s.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / s.len() as f32;
+                    (mean, var.sqrt())
+                };
+                let (lo, lsd) = flat(&seg[..4]);
+                let (hi, hsd) = flat(&seg[PROFILE - 4..]);
+                if lsd < 4.0 && hsd < 4.0 && hi - lo > 40.0 {
+                    out.push(seg.map(|v| (v - lo) / (hi - lo)));
+                }
+            }
+        }
+    }
+}
+
+/// The overshoot of the typical (median) edge, if there are enough of them.
+fn overshoot_of(profiles: &[[f32; PROFILE]]) -> Option<f32> {
+    if profiles.len() < 40 {
+        return None;
+    }
+    let typical: [f32; PROFILE] =
+        std::array::from_fn(|i| median(profiles.iter().map(|p| p[i]).collect()));
+    Some((typical.iter().copied().fold(f32::MIN, f32::max) - 1.0).max(0.0))
 }
 
 /// Measures consecutive frames of one place. `w` x `h` is the brightness size;
@@ -170,6 +312,20 @@ pub fn measure(frames: &[Frame], w: usize, h: usize) -> Measure {
             }
         }
     }
+    let fit = |blue: bool| {
+        let v: Vec<Curve> = frames
+            .iter()
+            .step_by(3)
+            .filter_map(|f| colour_curve(f, w, h, blue))
+            .collect();
+        mean_curve(&v)
+    };
+    m.colour_fit = fit(true).zip(fit(false)).map(|(b, r)| [b, r]);
+    let mut profiles = Vec::new();
+    for f in frames.iter().step_by(2) {
+        edge_profiles(&f.y, w, h, &mut profiles);
+    }
+    m.overshoot = overshoot_of(&profiles);
     m.cast = (whites * 100 >= (frames.len() * cw * ch) as u64 && whites > 0)
         .then(|| (du as f32 / whites as f32, dv as f32 / whites as f32));
     m.clipped = if total > 0 {
@@ -202,6 +358,10 @@ pub struct Suggestion {
     pub crf: u32,
     /// Black edges to cut: left, right, top, bottom (even numbers).
     pub crop: Option<[u32; 4]>,
+    /// Lines the colour sits too low (blue, red).
+    pub colour_align: Option<(i32, i32)>,
+    /// Strength for softening bright outlines, 0 = not needed.
+    pub dehalo: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -309,6 +469,39 @@ pub fn recommend(info: &VideoInfo, measures: &[Measure], have: Available) -> Rep
             ));
         }
     }
+    let lines = |channel: usize| {
+        let places: Vec<Curve> = measures
+            .iter()
+            .filter_map(|m| m.colour_fit.map(|c| c[channel]))
+            .collect();
+        pooled_shift(&places)
+    };
+    let (blue, red) = (lines(0), lines(1));
+    let colour_align = (blue.abs() >= 1.5 || red.abs() >= 1.5).then(|| {
+        (
+            (blue.round() as i32).clamp(-8, 8),
+            (red.round() as i32).clamp(-8, 8),
+        )
+    });
+    if let Some((u, v)) = colour_align {
+        reasons.push(format!(
+            "The colour is out of line with the picture (blue {u}, red {v} lines low, usual for tape): move it back."
+        ));
+    }
+    let overshoots: Vec<f32> = measures.iter().filter_map(|m| m.overshoot).collect();
+    let overshoot = median(overshoots.clone());
+    let dehalo = if overshoots.len() >= 2 && overshoot >= 0.15 {
+        40
+    } else {
+        0
+    };
+    if dehalo > 0 {
+        reasons.push(format!(
+            "Edges have bright outlines from the camera's sharpening (overshoot about {:.0}%): soften them (strength {dehalo}).",
+            overshoot * 100.0
+        ));
+    }
+
     let clipped = pick(|m| m.clipped);
     if clipped > 0.05 {
         notes.push(format!(
@@ -336,6 +529,8 @@ pub fn recommend(info: &VideoInfo, measures: &[Measure], have: Available) -> Rep
             grain,
             crf: 18,
             crop,
+            colour_align,
+            dehalo,
         },
         reasons,
         notes,
@@ -551,6 +746,110 @@ mod tests {
         assert!(!r.suggestion.five_frame && !r.suggestion.ai_upscaler);
         assert_eq!(r.suggestion.denoise, "strong");
         assert!(r.reasons.iter().any(|x| x.contains("models get")));
+    }
+
+    /// A picture of horizontal bands; the colour bands sit `low` lines lower.
+    fn bands(low: usize) -> Frame {
+        // Irregular band heights, so only one alignment fits.
+        let edge = |y: usize| {
+            [0, 17, 29, 52, 60, 83, 101, 118]
+                .iter()
+                .filter(|&&e| y >= e)
+                .count()
+                % 2
+                == 1
+        };
+        let y = (0..W * H)
+            .map(|i| if edge(i / W) { 190 } else { 60 })
+            .collect();
+        let plane: Vec<u8> = (0..W * H / 4)
+            .map(|i| {
+                // A colour row covers two picture lines: average them.
+                let row = (i / (W / 2)) * 2;
+                let at = |r: usize| {
+                    if edge(r.saturating_sub(low)) {
+                        170
+                    } else {
+                        110
+                    }
+                };
+                ((at(row) + at(row + 1)) / 2) as u8
+            })
+            .collect();
+        Frame {
+            y,
+            u: plane.clone(),
+            v: plane,
+        }
+    }
+
+    #[test]
+    fn colour_that_sits_low_is_measured_over_many_places() {
+        for low in [0usize, 2, 4, 6] {
+            let c = colour_curve(&bands(low), W, H, true).expect("edges");
+            let got = pooled_shift(&[c; 8]);
+            assert!((got - low as f64).abs() < 1.0, "true {low}, measured {got}");
+        }
+    }
+
+    #[test]
+    fn colour_is_moved_only_when_enough_places_agree() {
+        let curve = |low| colour_curve(&bands(low), W, H, true).unwrap();
+        let place = |low| Measure {
+            colour_fit: Some([curve(low), curve(low)]),
+            ..Measure::default()
+        };
+        let suggest = |places: &[Measure]| {
+            recommend(&info(720, 576, true), places, ALL)
+                .suggestion
+                .colour_align
+        };
+        let mostly: Vec<Measure> = (0..8).map(|i| place(if i < 7 { 4 } else { 0 })).collect();
+        assert_eq!(suggest(&mostly), Some((4, 4)));
+        // Half the places say otherwise: leave the colour alone.
+        let split: Vec<Measure> = (0..8).map(|i| place(if i < 4 { 4 } else { 0 })).collect();
+        assert_eq!(suggest(&split), None);
+        // Too few places to trust, however much they agree.
+        assert_eq!(suggest(&[place(4), place(4), place(4)]), None);
+        let flat: Vec<Measure> = (0..8).map(|_| place(0)).collect();
+        assert_eq!(suggest(&flat), None);
+    }
+
+    #[test]
+    fn sharpening_outlines_are_measured_and_a_clean_edge_needs_nothing() {
+        let picture = |profile: &[u8]| -> Vec<u8> {
+            let mut line = [60u8; W];
+            line[80..80 + profile.len()].copy_from_slice(profile);
+            line[80 + profile.len()..].fill(180);
+            line.repeat(H)
+        };
+        let measured = |p: &[u8]| {
+            let mut v = Vec::new();
+            edge_profiles(&picture(p), W, H, &mut v);
+            overshoot_of(&v).expect("enough edges")
+        };
+        let clean = measured(&[80, 150]);
+        let ringing = measured(&[45, 120, 215, 220, 195]);
+        assert!(clean < 0.05, "{clean}");
+        assert!((ringing - 0.33).abs() < 0.05, "{ringing}");
+        let with = |o: f32| Measure {
+            overshoot: Some(o),
+            ..Measure::default()
+        };
+        let places = [with(ringing), with(0.3)];
+        assert_eq!(
+            recommend(&info(720, 576, true), &places, ALL)
+                .suggestion
+                .dehalo,
+            40
+        );
+        let places = [with(clean), with(0.05)];
+        assert_eq!(
+            recommend(&info(720, 576, true), &places, ALL)
+                .suggestion
+                .dehalo,
+            0
+        );
     }
 
     #[test]

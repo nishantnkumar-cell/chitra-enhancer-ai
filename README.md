@@ -64,6 +64,15 @@ to remove a cast; the analysis reports what it sees but does not apply it, becau
 a sky also counts as "whitish". Try it with `--preview`, which also says how long
 the whole video would take.
 
+### Tape faults: colour fringes and bright outlines
+
+`--colour-align BLUE:RED` moves colour up by that many lines (-8..8). Tape often
+records colour a few lines below the picture, which fringes coloured edges.
+`--dehalo 0..100` softens the bright rims left by a camcorder's edge sharpening
+(sideways, where they are strongest); about 40 keeps detail, higher gets soft.
+`--analyze` measures both and suggests them only when it can tell: colour is
+moved only if most places agree.
+
 ## DVDs
 
 `-i` also takes a DVD: an `.iso` image, a drive, or a folder holding `VIDEO_TS`.

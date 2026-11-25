@@ -672,6 +672,26 @@ impl eframe::App for App {
                             } else {
                                 self.s.colour_shift = None;
                             }
+                            ui.add(
+                                egui::Slider::new(&mut self.s.dehalo, 0..=100)
+                                    .text("Soften edge outlines"),
+                            )
+                            .on_hover_text(
+                                "Reduces the bright rims a camera's sharpening leaves. About 40 suits tape; 0 is off.",
+                            );
+                            let mut line_up = self.s.colour_align.is_some();
+                            ui.checkbox(&mut line_up, "Line up colour with the picture");
+                            if line_up {
+                                let (u, v) = self.s.colour_align.get_or_insert((0, 0));
+                                ui.horizontal(|ui| {
+                                    ui.label("Lines too low: blue");
+                                    ui.add(egui::DragValue::new(u).range(-8..=8));
+                                    ui.label("red");
+                                    ui.add(egui::DragValue::new(v).range(-8..=8));
+                                });
+                            } else {
+                                self.s.colour_align = None;
+                            }
                             ui.collapsing("Advanced", |ui| {
                                 let mut crf = self.s.crf;
                                 ui.horizontal(|ui| {

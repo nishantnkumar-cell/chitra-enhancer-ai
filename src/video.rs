@@ -115,6 +115,11 @@ pub struct Options {
     /// Amounts subtracted from the two colour channels (blue, red) to remove a
     /// colour cast.
     pub colour_shift: Option<(i32, i32)>,
+    /// Lines the colour sits too low (blue, red): it is moved up by this much.
+    pub colour_align: Option<(i32, i32)>,
+    /// How strongly to soften the bright outlines left by a camera's edge
+    /// sharpening, 0 (off) to 100.
+    pub dehalo: u32,
     /// For tests: stop (as if by Ctrl-C) after this many chunks of this run.
     pub stop_after_chunks: Option<usize>,
 }
@@ -195,6 +200,14 @@ impl Options {
         {
             bail!("--colour-shift values must be -40 to 40");
         }
+        if let Some((u, v)) = self.colour_align
+            && (u.abs() > 8 || v.abs() > 8)
+        {
+            bail!("--colour-align values must be -8 to 8");
+        }
+        if self.dehalo > 100 {
+            bail!("--dehalo must be 0 to 100");
+        }
         Ok(())
     }
 
@@ -238,12 +251,22 @@ impl Options {
         if let Some(d) = self.denoise.filter() {
             f.push(d.to_string());
         }
-        if let Some((u, v)) = self.colour_shift
-            && (u, v) != (0, 0)
-        {
+        // The tape repairs work on separate brightness and colour planes.
+        let align = self.colour_align.filter(|&a| a != (0, 0));
+        let tint = self.colour_shift.filter(|&t| t != (0, 0));
+        if align.is_some() || tint.is_some() || self.dehalo > 0 {
+            f.push("format=yuv444p".into());
+        }
+        if let Some((u, v)) = align {
+            f.push(format!("chromashift=cbv={}:crv={}", -u, -v));
+        }
+        if let Some((u, v)) = tint {
             f.push(format!(
-                "format=yuv444p,lutyuv=u=clip(val-({u})\\,0\\,255):v=clip(val-({v})\\,0\\,255)"
+                "lutyuv=u=clip(val-({u})\\,0\\,255):v=clip(val-({v})\\,0\\,255)"
             ));
+        }
+        if self.dehalo > 0 {
+            f.push(dehalo_filter(self.dehalo));
         }
         let (sw, sh) = cut.square_size();
         if (sw, sh) != (cut.width, cut.height) {
@@ -320,7 +343,7 @@ impl Options {
         temporal: Option<&dyn Temporal>,
     ) -> String {
         format!(
-            "v3|{}|{:?}|{:?}|{}|{:?}|{:?}|{:?}|{}|{}|{}|{}|{:?}|{:?}",
+            "v4|{}|{:?}|{:?}|{}|{:?}|{:?}|{:?}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{}",
             self.input.display(),
             self.denoise,
             self.deinterlace,
@@ -334,6 +357,8 @@ impl Options {
             format_args!("{} {}x{}", engine.describe(), info.width, info.height),
             self.crop,
             self.colour_shift,
+            self.colour_align,
+            self.dehalo,
         )
     }
 }
@@ -563,6 +588,18 @@ fn check_output_size(o: &Options, info: &VideoInfo, scale: usize) -> Result<()> 
     Ok(())
 }
 
+/// Sideways smoothing of the brightness that cancels a camera's edge
+/// sharpening: nine taps that taper off, blended in by `strength` (1..=100).
+/// The tap shape was fitted to the edge response measured on real tape (an
+/// overshoot of a third falls to 7% at full strength; 40 keeps detail).
+/// Weights that jump out at a distance would echo thin lines, so they taper.
+fn dehalo_filter(strength: u32) -> String {
+    let s = strength.min(100);
+    let [a, b, c, d] = [s * 8 / 10, s * 7 / 10, s * 7 / 10, s * 6 / 10];
+    let mid = 1000 - 2 * (a + b + c + d);
+    format!("convolution=0m='{d} {c} {b} {a} {mid} {a} {b} {c} {d}':0mode=row:0rdiv=0.001")
+}
+
 /// What `preview` made.
 pub struct Preview {
     pub clip: PathBuf,
@@ -625,6 +662,8 @@ pub fn preview(
     let mut plain = o.clone();
     plain.denoise = Denoise::Off;
     plain.colour_shift = None;
+    plain.colour_align = None;
+    plain.dehalo = 0;
     let compare = o.output.with_extension("compare.png");
     let graph = format!(
         "[0:v]{},scale={ow}:{oh}:flags=neighbor,setsar=1[a];[1:v]scale={ow}:{oh},setsar=1[b];[a][b]hstack",
@@ -813,6 +852,8 @@ mod tests {
             stop_after_chunks: None,
             crop: None,
             colour_shift: None,
+            colour_align: None,
+            dehalo: 0,
         }
     }
 
@@ -862,6 +903,42 @@ mod tests {
         o.crop = None;
         o.colour_shift = Some((99, 0));
         assert!(o.check_picture(&dv()).is_err(), "out of range");
+    }
+
+    #[test]
+    fn tape_repairs_work_on_the_planes_and_keep_brightness_the_same() {
+        let mut o = opts();
+        o.colour_align = Some((2, 3));
+        o.dehalo = 40;
+        let f = o.decode_filters(&dv());
+        assert!(
+            f.contains("format=yuv444p,chromashift=cbv=-2:crv=-3,convolution="),
+            "{f}"
+        );
+        // The nine weights always add up to one whole: flat areas are unchanged.
+        for s in 1..=100 {
+            let text = dehalo_filter(s);
+            let taps: Vec<u32> = text
+                .split('\'')
+                .nth(1)
+                .unwrap()
+                .split(' ')
+                .map(|n| n.parse().unwrap())
+                .collect();
+            assert_eq!(taps.len(), 9);
+            assert_eq!(taps.iter().sum::<u32>(), 1000, "strength {s}");
+            assert!(taps[4] >= taps[3] && taps[3] >= taps[2], "tapers: {taps:?}");
+        }
+        o.colour_align = Some((9, 0));
+        assert!(o.check_picture(&dv()).is_err());
+        o.colour_align = Some((0, 0));
+        o.dehalo = 0;
+        assert!(
+            !o.decode_filters(&dv()).contains("yuv444p"),
+            "nothing to repair"
+        );
+        o.dehalo = 101;
+        assert!(o.check_picture(&dv()).is_err());
     }
 
     #[test]
