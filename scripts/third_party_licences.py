@@ -57,7 +57,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 def run(*args):
-    return subprocess.run(args, cwd=ROOT, check=True, capture_output=True, text=True).stdout
+    # Only stdout is captured, so a failing command's own message is shown.
+    done = subprocess.run(args, cwd=ROOT, stdout=subprocess.PIPE, text=True)
+    if done.returncode != 0:
+        sys.exit(f"failed ({done.returncode}): {' '.join(args)}")
+    return done.stdout
 
 
 def section(title, text):
@@ -67,6 +71,7 @@ def section(title, text):
 
 def main(out):
     out = pathlib.Path(out).resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
     run("cargo", "about", "generate", "--features", FEATURES, "--fail", "--locked",
         "-o", str(out), "packaging/third-party.hbs")
     meta = json.loads(run("cargo", "metadata", "--format-version", "1", "--locked",
