@@ -337,6 +337,33 @@ pub fn parse_progress(line: &str) -> Option<(u64, u64)> {
     Some((done, total))
 }
 
+/// One argument, quoted so that a shell takes it literally. File names can hold
+/// `;`, `$(...)`, backticks or quotes, and a printed command may be pasted.
+/// Windows output is for PowerShell, elsewhere for POSIX shells and fish.
+pub fn quote(arg: &str) -> String {
+    let plain = !arg.is_empty()
+        && !arg.starts_with('~')
+        && arg.chars().all(|c| {
+            c.is_ascii_alphanumeric() || "_-./:=+,@".contains(c) || (cfg!(windows) && c == '\\')
+        });
+    if plain {
+        arg.to_string()
+    } else if cfg!(windows) {
+        format!("'{}'", arg.replace('\'', "''"))
+    } else {
+        format!("'{}'", arg.replace('\'', r"'\''"))
+    }
+}
+
+/// The whole command for `args` (progress reporting left out).
+pub fn command_line(args: &[String]) -> String {
+    let words = args.iter().filter(|a| *a != "--progress").map(|a| quote(a));
+    std::iter::once("chitra-enhance".to_string())
+        .chain(words)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// `ANALYSIS {...}` -> the report.
 pub fn parse_analysis(line: &str) -> Option<crate::analyze::Report> {
     serde_json::from_str(line.strip_prefix("ANALYSIS ")?).ok()
@@ -637,6 +664,50 @@ mod tests {
         assert!(!a.contains(&"--temporal-model".to_string()));
         assert_eq!(parse_title("TITLE 2 3600"), Some((2, 3600.0)));
         assert_eq!(parse_title("x"), None);
+    }
+
+    #[test]
+    fn printed_commands_quote_anything_a_shell_would_act_on() {
+        assert_eq!(quote("/v/old.avi"), "/v/old.avi");
+        assert_eq!(quote("--crf"), "--crf");
+        for nasty in [
+            "a;b", "$(id)", "`id`", "a b", "x|y", "&", "~", "", "*.mp4", "a\nb",
+        ] {
+            let q = quote(nasty);
+            assert!(q.starts_with('\'') && q.ends_with('\''), "{nasty:?} -> {q}");
+        }
+        let line = command_line(&["-i".into(), "a;b".into(), "--progress".into()]);
+        assert_eq!(line, "chitra-enhance -i 'a;b'");
+    }
+
+    /// A real shell reads back exactly the arguments that went in.
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_reads_quoted_arguments_back_unchanged() {
+        let args = [
+            "it's",
+            "a;echo INJECTED",
+            "$(echo INJECTED)",
+            "`id`",
+            "two  spaces",
+            "-x",
+            "~root",
+            "\"q\"",
+            "back\\slash",
+            "new\nline",
+            "*",
+        ];
+        let words: Vec<String> = args.iter().map(|a| quote(a)).collect();
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("printf '%s\\0' {}", words.join(" ")))
+            .output()
+            .unwrap();
+        let back: Vec<&str> = std::str::from_utf8(&out.stdout)
+            .unwrap()
+            .split_terminator('\0')
+            .collect();
+        assert_eq!(back, args);
     }
 
     #[test]

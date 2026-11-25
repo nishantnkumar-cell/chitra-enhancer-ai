@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [inspect_jpeg, photo_decode, noise_gray, text_lines]
+        target: [inspect_jpeg, photo_decode, noise_gray, text_lines, disc_sector, analyze_frames]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

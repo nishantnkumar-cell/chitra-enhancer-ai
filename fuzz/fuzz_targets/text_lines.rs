@@ -7,6 +7,9 @@ fuzz_target!(|data: &[u8]| {
     for line in s.lines() {
         let _ = chitra_enhance::job::parse_progress(line);
         let _ = chitra_enhance::job::parse_noise(line);
+        let _ = chitra_enhance::job::parse_title(line);
+        let _ = chitra_enhance::job::parse_analysis(line);
+        let _ = chitra_enhance::job::quote(line);
     }
     let _ = chitra_enhance::ffmpeg::parse_probe(&s);
 });

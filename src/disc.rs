@@ -83,7 +83,7 @@ pub fn source(path: &Path) -> Option<PathBuf> {
 }
 
 /// True if this 2048-byte sector is an MPEG-2 pack carrying scrambled data.
-fn scrambled_sector(s: &[u8]) -> bool {
+pub fn scrambled_sector(s: &[u8]) -> bool {
     if s.len() < SECTOR || s[0..4] != [0, 0, 1, 0xBA] || s[4] & 0xC0 != 0x40 {
         return false;
     }
@@ -132,7 +132,8 @@ pub fn check_unprotected(src: &Path) -> Result<()> {
             let mut any = false;
             for e in std::fs::read_dir(ts)?.filter_map(|e| e.ok()) {
                 let p = e.path();
-                if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("vob")) {
+                // Only real files: opening a pipe with this name would hang.
+                if p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("vob")) {
                     any |= scrambled_in(&p, 600)?;
                 }
             }
@@ -187,7 +188,7 @@ pub fn titles(tools: &Tools, src: &Path) -> Result<Vec<Title>> {
             break;
         }
         if let Ok(seconds) = String::from_utf8_lossy(&out.stdout).trim().parse::<f64>()
-            && seconds.is_finite()
+            && (0.0..=crate::ffmpeg::MAX_SECONDS).contains(&seconds)
         {
             found.push(Title { number, seconds });
         }

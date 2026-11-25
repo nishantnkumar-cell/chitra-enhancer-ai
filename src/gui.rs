@@ -918,7 +918,7 @@ impl eframe::App for App {
             ui.add_space(6.0);
             ui.collapsing("Command line", |ui| {
                 ui.label(
-                    RichText::new(format!("chitra-enhance {}", self.s.args().join(" ")))
+                    RichText::new(job::command_line(&self.s.args()))
                         .monospace()
                         .small(),
                 );

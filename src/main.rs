@@ -109,6 +109,11 @@ struct Args {
     /// Print `PROGRESS done total` lines on stdout (used by the GUI).
     #[arg(long, hide = true)]
     progress: bool,
+    /// Accepted but unused in a build without AI support, so that the same
+    /// command works with either build.
+    #[cfg(not(feature = "onnx"))]
+    #[arg(long = "device", hide = true)]
+    _device: Option<String>,
     /// Which processor runs the model.
     #[cfg(feature = "onnx")]
     #[arg(long, value_enum, default_value_t = chitra_enhance::onnx::Device::Auto)]
@@ -400,20 +405,8 @@ fn show_analysis(
         ..job::Settings::default()
     };
     s.apply(&r.suggestion, upscaler, denoiser);
-    let quoted: Vec<String> = s
-        .args()
-        .into_iter()
-        .filter(|x| x != "--progress")
-        .map(|x| {
-            if x.contains(' ') {
-                format!("\"{x}\"")
-            } else {
-                x
-            }
-        })
-        .collect();
     println!("\nCommand with these settings (change any of them):");
-    println!("  chitra-enhance {}", quoted.join(" "));
+    println!("  {}", job::command_line(&s.args()));
     println!("Add --preview 5 to try them on a few seconds first.");
     if a.progress {
         println!("ANALYSIS {}", serde_json::to_string(&r)?);

@@ -13,7 +13,10 @@ use crate::engine::Engine;
 use crate::tiler::Plane;
 
 /// Decoded pixels may not exceed this (a hostile file cannot ask for more).
-const MAX_PIXELS: u64 = 250_000_000;
+/// Largest picture accepted, and (below) largest result. A file only has to
+/// *declare* a size for memory to be set aside for it, and one over the output
+/// limit could never be processed, so it is refused before decoding.
+const MAX_PIXELS: u64 = MAX_OUTPUT_PIXELS;
 /// Largest enlarged picture: the float picture, the tile accumulator and the
 /// encoder each need several bytes per pixel.
 const MAX_OUTPUT_PIXELS: u64 = 120_000_000;
@@ -61,13 +64,19 @@ pub fn check_paths(input: &Path, output: &Path, force: bool) -> Result<()> {
 }
 
 pub fn decode(bytes: &[u8]) -> Result<Photo> {
+    decode_with_limit(bytes, MAX_PIXELS)
+}
+
+/// `decode` with its own size limit (the fuzzer uses a small one, so that it
+/// exercises the parsing rather than the memory a large picture rightly needs).
+pub fn decode_with_limit(bytes: &[u8], max_pixels: u64) -> Result<Photo> {
     let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
     let mut limits = Limits::default();
     limits.max_alloc = Some(2 << 30);
     reader.limits(limits);
     let mut decoder = reader.into_decoder().context("cannot read this image")?;
     let (w, h) = decoder.dimensions();
-    if u64::from(w) * u64::from(h) > MAX_PIXELS {
+    if u64::from(w) * u64::from(h) > max_pixels {
         bail!("image too large ({w}x{h})");
     }
     let icc = decoder.icc_profile().ok().flatten();
@@ -90,7 +99,7 @@ pub fn decode(bytes: &[u8]) -> Result<Photo> {
         e
     });
     let had_alpha = img.color().has_alpha();
-    let rgb = img.to_rgb16();
+    let rgb = img.into_rgb16(); // drops the original: less memory at the peak
     let (w, h) = (rgb.width() as usize, rgb.height() as usize);
     let data = rgb
         .as_raw()
@@ -274,6 +283,22 @@ mod tests {
             assert!(run(&o, &bytes, &mut Lanczos::new(2)).is_err());
             assert_eq!(std::fs::read(&input).unwrap(), bytes);
         }
+    }
+
+    /// Found by the fuzzer: 44 bytes declaring a 203-megapixel GIF made the
+    /// decoder set aside gigabytes before anything refused it.
+    #[test]
+    fn a_tiny_file_declaring_a_huge_picture_is_refused_before_decoding() {
+        let bomb: &[u8] = &[
+            0x47, 0x49, 0x46, 0x38, 0x37, 0x61, 0x52, 0x49, 0x49, 0x2a, 0x00, 0xd1, 0x2c, 0x16,
+            0x61, 0x52, 0x49, 0x49, 0x2a, 0x00, 0xd1, 0x2c, 0x16, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x0f,
+            0xff,
+        ];
+        let started = std::time::Instant::now();
+        let err = decode(bomb).err().expect("refused").to_string();
+        assert!(err.contains("too large"), "{err}");
+        assert!(started.elapsed().as_secs() < 2);
     }
 
     #[test]
