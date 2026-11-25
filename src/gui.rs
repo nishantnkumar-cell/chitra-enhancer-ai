@@ -9,6 +9,7 @@ use std::sync::mpsc::{Receiver, channel};
 
 use chitra_enhance::analyze::Report;
 use chitra_enhance::job::{self, Settings};
+use chitra_enhance::legal;
 use eframe::egui::{self, Color32, RichText};
 
 const TEAL: Color32 = Color32::from_rgb(0x3f, 0xd0, 0xb5);
@@ -65,6 +66,8 @@ struct App {
     library: Vec<PathBuf>,
     /// A file or disc given on the command line, opened on the first frame.
     open_first: Option<PathBuf>,
+    /// The About window is open.
+    about: bool,
     /// For development: save a picture of the window here, then close.
     screenshot: Option<PathBuf>,
     frames: u32,
@@ -92,6 +95,30 @@ fn pick_file(title: &str, exts: &[&str]) -> Option<PathBuf> {
 }
 
 /// A model choice: pick from the library, or any other .onnx file.
+/// Copyright, terms, no warranty and where the source is.
+fn about_window(ctx: &egui::Context, open: &mut bool) {
+    egui::Window::new("About")
+        .open(open)
+        .collapsible(false)
+        .resizable(false)
+        .default_width(420.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.heading(concat!("Chitra Enhancer AI ", env!("CARGO_PKG_VERSION")));
+            ui.label(legal::COPYRIGHT);
+            ui.add_space(6.0);
+            ui.label(legal::TERMS);
+            ui.add_space(6.0);
+            ui.hyperlink_to(
+                "Read the licence",
+                format!("{}/blob/main/LICENSE", legal::SOURCE),
+            );
+            ui.hyperlink_to("Get the source", legal::SOURCE);
+            ui.add_space(6.0);
+            ui.label(RichText::new(legal::OTHERS).small());
+        });
+}
+
 fn model_row(ui: &mut egui::Ui, label: &str, value: &mut Option<PathBuf>, library: &[PathBuf]) {
     ui.horizontal(|ui| {
         ui.label(label);
@@ -151,6 +178,8 @@ impl App {
             report: None,
             query_note: String::new(),
             open_first: std::env::args_os().nth(1).map(PathBuf::from),
+            // CHITRA_GUI_ABOUT is for pictures of that window.
+            about: std::env::var_os("CHITRA_GUI_ABOUT").is_some(),
             screenshot: std::env::var_os("CHITRA_GUI_SCREENSHOT").map(PathBuf::from),
             frames: 0,
             library: job::models_dir()
@@ -521,7 +550,14 @@ impl eframe::App for App {
             .show(root, |ui| {
                 ui.add_enabled_ui(!running, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
-                        ui.heading("Settings");
+                        ui.horizontal(|ui| {
+                            ui.heading("Settings");
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("About").clicked() {
+                                    self.about = true;
+                                }
+                            });
+                        });
                         ui.add_space(6.0);
                         if ui
                             .button("Add your own model…")
@@ -957,6 +993,7 @@ impl eframe::App for App {
                     }
                 });
         });
+        about_window(ctx, &mut self.about);
     }
 
     fn on_exit(&mut self, _: Option<&eframe::glow::Context>) {

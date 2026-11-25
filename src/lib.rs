@@ -7,6 +7,7 @@ pub mod ffmpeg;
 pub mod infer;
 pub mod inspector;
 pub mod job;
+pub mod legal;
 pub mod models;
 pub mod noise;
 #[cfg(feature = "onnx")]

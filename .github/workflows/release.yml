@@ -11,8 +11,37 @@ permissions:
   contents: read
 
 jobs:
+  # What the licence requires beside the programs: the notices of everything
+  # built in, and the complete source.
+  legal:
+    name: licence notices and source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo install cargo-about --version 0.9.3 --locked --features cli
+      - run: python3 scripts/third_party_licences.py notices/THIRD_PARTY_LICENCES.txt
+      - name: Source, libraries included
+        run: scripts/source_bundle.sh "chitra-enhancer-ai-${GITHUB_REF_NAME//\//-}-source" source
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: notices
+          path: notices/THIRD_PARTY_LICENCES.txt
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bundle-source
+          path: source/*
+          if-no-files-found: error
+
   bundle:
     name: bundle (${{ matrix.name }})
+    needs: legal
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -30,16 +59,30 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo build --release --features gui,onnx
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: notices
+          path: notices
       - name: Bundle
         shell: bash
         run: |
           set -euo pipefail
           VER="${GITHUB_REF_NAME:-dev}"
+          VER="${VER//\//-}"
           DIR="chitra-enhancer-ai-${VER}-${{ matrix.name }}"
           mkdir "$DIR"
           EXE=""; [ "${{ runner.os }}" = "Windows" ] && EXE=".exe"
           cp "target/release/chitra-enhance${EXE}" "target/release/chitra-enhance-gui${EXE}" "$DIR/"
-          cp README.md LICENSE docs/MODEL_LICENCES.md docs/USER_GUIDE.md SECURITY.md "$DIR/"
+          cp README.md LICENSE docs/MODEL_LICENCES.md docs/USER_GUIDE.md docs/RELEASE_NOTES.md SECURITY.md "$DIR/"
+          cp notices/THIRD_PARTY_LICENCES.txt "$DIR/"
+          printf '%s\n' \
+            "Chitra Enhancer AI ${VER}, built from commit ${GITHUB_SHA}." \
+            "" \
+            "Source of this build, libraries included:" \
+            "  chitra-enhancer-ai-${VER}-source.tar.xz, offered with this download at" \
+            "  ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases" \
+            "Repository: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/tree/${GITHUB_SHA}" \
+            > "$DIR/SOURCE.txt"
           if [ "${{ matrix.ext }}" = "zip" ]; then
             7z a "$DIR.zip" "$DIR" >/dev/null
           else
@@ -61,8 +104,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          pattern: bundle-*
           path: dist
           merge-multiple: true
       - name: Check the bundles
@@ -70,6 +117,9 @@ jobs:
           cd dist
           ls -l
           test "$(ls *.tar.gz *.zip | wc -l)" -eq 3
+          test "$(ls *-source.tar.xz | wc -l)" -eq 1
+          for f in *.tar.gz; do tar tzf "$f" | grep -q '/THIRD_PARTY_LICENCES.txt$'; done
+          for f in *.zip; do unzip -l "$f" | grep -q 'THIRD_PARTY_LICENCES.txt$'; done
           for f in *.sha256; do sha256sum -c "$f"; done
       - name: Create the draft
         if: startsWith(github.ref, 'refs/tags/v')
@@ -77,4 +127,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
-            --draft --generate-notes --title "Chitra Enhancer AI $GITHUB_REF_NAME"
+            --draft --notes-file docs/RELEASE_NOTES.md --title "Chitra Enhancer AI $GITHUB_REF_NAME"

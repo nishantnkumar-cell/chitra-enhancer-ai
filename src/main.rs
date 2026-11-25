@@ -40,7 +40,11 @@ fn parse_shift(s: &str) -> Result<Shift, String> {
 
 /// Restore and enlarge old, noisy video (camcorder, tape) on your own computer.
 #[derive(Parser, Debug, Clone)]
-#[command(version, about)]
+#[command(
+    version,
+    about,
+    after_help = "Also: `chitra-enhance models` manages the AI models; `chitra-enhance licences` shows\nthe licence. Free software (AGPL-3.0-or-later) with no warranty."
+)]
 struct Args {
     /// The video or photo to restore, a folder of them, or a DVD (an .iso image,
     /// a drive, or a folder holding VIDEO_TS).
@@ -304,6 +308,13 @@ fn real_main() -> Result<()> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.first().map(String::as_str) == Some("models") {
         return models_command(&argv[1..]);
+    }
+    if matches!(
+        argv.first().map(String::as_str),
+        Some("licences" | "licenses")
+    ) {
+        println!("{}", chitra_enhance::legal::notice());
+        return Ok(());
     }
     let a = Args::parse();
     if let Some(src) = disc::source(&a.input) {
