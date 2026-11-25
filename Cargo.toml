@@ -3,6 +3,7 @@ name = "chitra-enhance"
 version = "0.1.0"
 description = "Chitra Enhancer AI: restore and upscale old, noisy video (and photos) with AI models, on your own GPU"
 license = "AGPL-3.0-or-later"
+repository = "https://github.com/nishantnkumar-cell/chitra-enhancer-ai"
 rust-version = "1.95"
 edition = "2024"
 

@@ -196,7 +196,8 @@ ONNX Runtime itself is looked for automatically (next to the program, in
 Video pipeline, resume, tiler, ONNX engine, grain, 1-4x scaling and photo mode
 (JPEG quality tiers, 16-bit JXL/PNG) work, tested with a real Real-ESRGAN model.
 Five-frame video denoising (FastDVDnet) and CI on Linux, Windows and macOS are in.
-The GUI works but has had only a smoke test (it starts and runs), no visual review yet.
+The window has been checked from screenshots, not yet by someone using it.
+Graphics card acceleration has not been tested on real hardware.
 
 ## Security
 
@@ -206,6 +207,25 @@ Dependabot, pinned Actions).
 
 ## Licence
 
-AGPL-3.0-or-later (see `LICENSE`), the same as Chitra, because the JPEG XL
-writer (`jxl-encoder`) is AGPL or commercial. FFmpeg and ONNX Runtime are
-separate programs/libraries that you install yourself.
+Copyright (C) 2026 the Chitra Enhancer AI authors.
+
+Free software under the **GNU Affero General Public License, version 3 or
+later** (`LICENSE`), with no warranty. You may use, share and change it,
+including commercially; if you pass on a changed version, or let people use one
+over a network, you must offer them its source under the same licence.
+Contributions are accepted under that licence.
+
+*Why this licence:* the JPEG XL writer, `jxl-encoder`, is AGPL-3.0 (or a
+commercial licence from its author), so the program is built and passed on as
+AGPL-3.0. It is also the licence of Chitra.
+
+Not covered by it, each under its own terms:
+
+* **Libraries and fonts built in:** notices in `THIRD_PARTY_LICENCES.txt` in
+  every download (made by `scripts/third_party_licences.py`). Each release also
+  carries the complete source, libraries included.
+* **AI models:** downloaded separately, BSD-3-Clause and MIT
+  (`docs/MODEL_LICENCES.md`).
+* **FFmpeg and ONNX Runtime:** separate programs you install yourself.
+* **Your pictures and videos** are yours; the licence does not apply to what the
+  program makes from them.

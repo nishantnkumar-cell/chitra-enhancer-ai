@@ -131,3 +131,10 @@ use a second model for cleaning (`--model-compressed`).
 
 To report a problem, see `SECURITY.md` for security issues, otherwise open an issue
 on GitHub. Please do not attach private footage.
+
+## 10. Licence
+
+Free software (AGPL-3.0-or-later) with no warranty. **About** in the window, or
+`chitra-enhance licences`, shows the notice. Your pictures and videos remain
+yours.
+

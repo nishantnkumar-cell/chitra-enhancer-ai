@@ -181,6 +181,18 @@ impl Settings {
     }
 
     /// Takes over what an analysis suggested. Everything stays editable.
+    /// The film grain that will be added: the chosen amount, or else what the
+    /// command line does on its own (3 after the simple denoise filter, which
+    /// is not used with five-frame denoising; otherwise none).
+    pub fn effective_grain(&self) -> u32 {
+        self.grain
+            .unwrap_or(if self.five_frame || self.denoise == "off" {
+                0
+            } else {
+                3
+            })
+    }
+
     pub fn apply(
         &mut self,
         s: &crate::analyze::Suggestion,
@@ -496,6 +508,25 @@ mod tests {
                 "h265"
             ]
         );
+    }
+
+    #[test]
+    fn the_grain_shown_is_the_grain_added() {
+        let mut s = Settings {
+            denoise: "light".into(),
+            ..Settings::default()
+        };
+        assert_eq!(s.effective_grain(), 3);
+        s.denoise = "off".into();
+        assert_eq!(s.effective_grain(), 0);
+        s.denoise = "light".into();
+        s.five_frame = true;
+        assert_eq!(s.effective_grain(), 0);
+        s.grain = Some(5);
+        assert_eq!(s.effective_grain(), 5);
+        s.five_frame = false;
+        s.grain = Some(0);
+        assert_eq!(s.effective_grain(), 0);
     }
 
     #[test]
