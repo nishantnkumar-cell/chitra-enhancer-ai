@@ -16,7 +16,8 @@ files you ask for. It treats these as **untrusted** and bounds them:
   checked before anything is allocated from them (`src/ffmpeg.rs`, `src/photo.rs`);
   decoding is done by the `image` crate and by ffmpeg, which are fuzzed upstream,
   and the JPEG header reader and decoder wrapper are fuzzed here (`fuzz/`).
-  Enlarged frames are capped at 100 million pixels (photos 120 million).
+  Photos declaring more than 120 million pixels are refused before decoding; enlarged
+  video frames are capped at 100 million pixels (photos 120 million).
 - **DVD images and drives.** Raw sectors are walked with bounds checks (fuzzed)
   to refuse copy-protected discs; the check samples sectors, so it is a guard
   against ordinary protected discs, not a proof about a crafted one. The disc
