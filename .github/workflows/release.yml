@@ -39,7 +39,7 @@ jobs:
           mkdir "$DIR"
           EXE=""; [ "${{ runner.os }}" = "Windows" ] && EXE=".exe"
           cp "target/release/chitra-enhance${EXE}" "target/release/chitra-enhance-gui${EXE}" "$DIR/"
-          cp README.md LICENSE docs/MODEL_LICENCES.md "$DIR/"
+          cp README.md LICENSE docs/MODEL_LICENCES.md docs/USER_GUIDE.md SECURITY.md "$DIR/"
           if [ "${{ matrix.ext }}" = "zip" ]; then
             7z a "$DIR.zip" "$DIR" >/dev/null
           else

@@ -286,7 +286,7 @@ pub fn find_runtime() -> Option<PathBuf> {
 }
 
 pub const RUNTIME_HELP: &str = "ONNX Runtime was not found. Install it, or point ORT_DYLIB_PATH at it:\n  \
-    Arch/CachyOS: sudo pacman -S onnxruntime (CPU) or onnxruntime-cuda\n  \
+    Arch/CachyOS: sudo pacman -S onnxruntime-cpu (or onnxruntime-cuda for NVIDIA)\n  \
     Debian/Ubuntu or any Linux: pip install onnxruntime (or onnxruntime-gpu), then set ORT_DYLIB_PATH to\n    \
     .../site-packages/onnxruntime/capi/libonnxruntime.so.*\n  \
     Windows: the onnxruntime.dll from the Microsoft.ML.OnnxRuntime.DirectML NuGet package, next to chitra-enhance.exe\n  \

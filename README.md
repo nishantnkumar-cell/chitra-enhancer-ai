@@ -7,6 +7,8 @@ Everything runs locally; nothing is uploaded.
 chitra-enhance -i tape.avi -o restored.mp4 --model realesr-2x-fp16.onnx
 ```
 
+**New here? Read the [user guide](docs/USER_GUIDE.md).**
+
 ## What it does to a video
 
 1. **Deinterlaces** tape-style fields (`bwdif`) when the file is interlaced. Captures
