@@ -221,6 +221,8 @@ fn a_temporal_stage_keeps_every_frame_of_every_chunk() {
         stop_after_chunks: None,
         crop: None,
         colour_shift: None,
+        colour_align: None,
+        dehalo: 0,
     };
     let mut engine = Lanczos::new(1);
     let mut temporal = Identity;
@@ -600,7 +602,19 @@ fn black_edges_can_be_cut_and_a_preview_estimates_the_whole_job() {
             .output()
             .unwrap()
     };
-    let r = run(&o, &["--crop", "10:6:2:2", "--colour-shift", "-5:3"]);
+    let r = run(
+        &o,
+        &[
+            "--crop",
+            "10:6:2:2",
+            "--colour-shift",
+            "-5:3",
+            "--colour-align",
+            "-2:3",
+            "--dehalo",
+            "40",
+        ],
+    );
     assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
     assert_eq!(frames(&o).0, "144,116,75");
     let r = run(&d.path().join("p.mp4"), &["--preview", "1"]);
@@ -610,6 +624,8 @@ fn black_edges_can_be_cut_and_a_preview_estimates_the_whole_job() {
         ["--crop", "3:0:0:0"],
         ["--crop", "100:100:0:0"],
         ["--colour-shift", "90:0"],
+        ["--colour-align", "20:0"],
+        ["--dehalo", "101"],
     ] {
         let r = run(&d.path().join("bad.mp4"), &bad);
         assert!(!r.status.success(), "{bad:?}");

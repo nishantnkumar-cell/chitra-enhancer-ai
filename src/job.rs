@@ -43,6 +43,10 @@ pub struct Settings {
     pub crop: Option<[u32; 4]>,
     /// Colour-cast correction (blue, red).
     pub colour_shift: Option<(i32, i32)>,
+    /// Lines the colour sits too low (blue, red).
+    pub colour_align: Option<(i32, i32)>,
+    /// 0..=100: softens bright outlines from camera sharpening.
+    pub dehalo: u32,
 }
 
 impl Default for Settings {
@@ -72,6 +76,8 @@ impl Default for Settings {
             title: None,
             crop: None,
             colour_shift: None,
+            colour_align: None,
+            dehalo: 0,
         }
     }
 }
@@ -194,6 +200,8 @@ impl Settings {
         self.grain = Some(s.grain);
         self.crf = Some(s.crf);
         self.crop = s.crop;
+        self.colour_align = s.colour_align;
+        self.dehalo = s.dehalo;
     }
 
     /// Arguments that analyse the input and print suggestions.
@@ -306,6 +314,12 @@ impl Settings {
             }
             if let Some((u, v)) = self.colour_shift {
                 a.extend(["--colour-shift".into(), format!("{u}:{v}")]);
+            }
+            if let Some((u, v)) = self.colour_align {
+                a.extend(["--colour-align".into(), format!("{u}:{v}")]);
+            }
+            if self.dehalo > 0 {
+                a.extend(["--dehalo".into(), self.dehalo.to_string()]);
             }
             if let Some(g) = self.grain {
                 a.extend(["--grain".into(), g.to_string()]);
@@ -604,6 +618,8 @@ mod tests {
             grain: 0,
             crf: 18,
             crop: Some([10, 6, 0, 0]),
+            colour_align: Some((2, 3)),
+            dehalo: 40,
         };
         s.apply(&sug, Some("/m/up.onnx".into()), Some("/m/dn.onnx".into()));
         let a = s.args();
@@ -613,6 +629,8 @@ mod tests {
         assert_eq!(at(&a, "--grain").as_deref(), Some("0"));
         assert_eq!(at(&a, "--crf").as_deref(), Some("18"));
         assert_eq!(at(&a, "--crop").as_deref(), Some("10:6:0:0"));
+        assert_eq!(at(&a, "--colour-align").as_deref(), Some("2:3"));
+        assert_eq!(at(&a, "--dehalo").as_deref(), Some("40"));
         s.colour_shift = Some((-4, 2));
         assert_eq!(at(&s.args(), "--colour-shift").as_deref(), Some("-4:2"));
         assert!(a.contains(&"--double-rate".to_string()));

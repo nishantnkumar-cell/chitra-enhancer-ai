@@ -61,6 +61,14 @@ struct Args {
     /// colour channels, for example 6:2. --analyze reports what it sees.
     #[arg(long, value_name = "BLUE:RED", value_parser = parse_shift, allow_hyphen_values = true)]
     colour_shift: Option<Shift>,
+    /// Line colour up with the picture: lines (-8..8) the blue and red colour
+    /// sit too low, for example 2:3. Common on tape. --analyze suggests values.
+    #[arg(long, value_name = "BLUE:RED", value_parser = parse_shift, allow_hyphen_values = true)]
+    colour_align: Option<Shift>,
+    /// Soften the bright outlines a camera's edge sharpening leaves, 0..100.
+    /// About 40 suits typical camcorder tape; higher also softens detail.
+    #[arg(long, default_value_t = 0)]
+    dehalo: u32,
     /// DVD only: show the titles on the disc.
     #[arg(long)]
     list_titles: bool,
@@ -690,6 +698,8 @@ fn run_one(mut a: Args) -> Result<()> {
         stop_after_chunks: a.stop_after_chunks,
         crop: a.crop.map(|c| c.0),
         colour_shift: a.colour_shift.map(|s| (s.0, s.1)),
+        colour_align: a.colour_align.map(|s| (s.0, s.1)),
+        dehalo: a.dehalo,
     };
     o.check_picture(&info)?;
     let mut engine: Box<dyn Engine> = match &a.model {
