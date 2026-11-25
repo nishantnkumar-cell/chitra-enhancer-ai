@@ -673,16 +673,22 @@ impl eframe::App for App {
                                         ui.selectable_value(&mut self.s.codec, d.into(), d);
                                     }
                                 });
-                            let mut g = self.s.grain.map(|g| g as f32);
-                            let mut on = g.is_some();
+                            // Ticked exactly when grain will be added. Left
+                            // alone, the amount follows the denoise settings.
+                            let mut amount = self.s.effective_grain();
+                            let mut on = amount > 0;
                             ui.horizontal(|ui| {
-                                ui.checkbox(&mut on, "Film grain");
-                                if on {
-                                    let v = g.get_or_insert(3.0);
-                                    ui.add(egui::Slider::new(v, 0.0..=30.0).integer());
+                                if ui.checkbox(&mut on, "Film grain").changed() {
+                                    self.s.grain = Some(if on { 3 } else { 0 });
+                                }
+                                if on
+                                    && ui
+                                        .add(egui::Slider::new(&mut amount, 1..=30))
+                                        .changed()
+                                {
+                                    self.s.grain = Some(amount);
                                 }
                             });
-                            self.s.grain = on.then(|| g.unwrap_or(3.0) as u32);
                             let mut crop = self.s.crop.is_some();
                             ui.checkbox(&mut crop, "Cut black edges");
                             if crop {
