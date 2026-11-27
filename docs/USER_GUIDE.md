@@ -187,6 +187,7 @@ the folder with the program, the ONNX Runtime files and `ffmpeg.exe`:
 .\install-windows-service.ps1 -Models "$env:LOCALAPPDATA\chitra-enhance\models"
 ```
 
+Add `-PhotoModel NAME` to use a different model for pictures than for clips.
 It then starts with Windows, whoever is signed in. The script prints the address.
 The key is the `"key"` line in `C:\ProgramData\ChitraEnhancer\config.json`
 (open it as administrator). Run the script again to update; use

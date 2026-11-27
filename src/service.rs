@@ -33,6 +33,9 @@ struct Serve {
     /// The model used when none is asked for, by file name.
     #[arg(long)]
     model: Option<String>,
+    /// A different usual model for pictures, by file name.
+    #[arg(long)]
+    photo_model: Option<String>,
     /// Which processor runs the model: auto, tensorrt, cuda, directml, coreml
     /// or cpu.
     #[arg(long)]
@@ -120,6 +123,9 @@ fn serve(a: Serve) -> Result<()> {
     }
     if a.model.is_some() {
         config.model = a.model;
+    }
+    if a.photo_model.is_some() {
+        config.photo_model = a.photo_model;
     }
     if let Some(device) = a.device {
         config.device = device;

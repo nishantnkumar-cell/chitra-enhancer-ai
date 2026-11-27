@@ -42,6 +42,9 @@ pub struct Config {
     pub models: Option<PathBuf>,
     /// The model used when none is asked for: a file name in `models`.
     pub model: Option<String>,
+    /// A different one for pictures; clips keep `model` (a model that suits
+    /// pictures is often too slow, or flickers, on video).
+    pub photo_model: Option<String>,
     /// How many times larger, when none is asked for.
     pub scale: usize,
     pub device: String,
@@ -67,6 +70,7 @@ impl Default for Config {
             data: std::env::temp_dir().join("chitra-enhance-service"),
             models: None,
             model: None,
+            photo_model: None,
             scale: 2,
             device: "auto".into(),
             vram_gb: 8,
@@ -112,11 +116,15 @@ impl Config {
         }
         #[cfg(feature = "onnx")]
         self.onnx_device()?;
-        if self.model.is_some() && !cfg!(feature = "onnx") {
-            bail!("a model is set up, but this build has no AI model support (feature \"onnx\")");
-        }
-        if self.model.is_some() && self.find_model(None).is_none() {
-            bail!("the default model is not in the models folder");
+        for name in [&self.model, &self.photo_model].into_iter().flatten() {
+            if !cfg!(feature = "onnx") {
+                bail!(
+                    "a model is set up, but this build has no AI model support (feature \"onnx\")"
+                );
+            }
+            if self.find_model(Some(name)).is_none() {
+                bail!("the default model \"{name}\" is not in the models folder");
+            }
         }
         Ok(())
     }
@@ -158,6 +166,11 @@ impl Config {
             .iter()
             .find(|n| *n == name)
             .map(|n| Some(folder.join(format!("{n}.onnx"))))
+    }
+
+    /// `find_model` for a picture: its own usual model when there is one.
+    pub fn find_photo_model(&self, wanted: Option<&str>) -> Option<Option<PathBuf>> {
+        self.find_model(wanted.or(self.photo_model.as_deref()))
     }
 
     /// Folders that error messages must not mention.
@@ -306,6 +319,7 @@ mod tests {
         bad(|c| c.scale = 3);
         bad(|c| c.max_clip_seconds = 0);
         bad(|c| c.model = Some("missing".into()));
+        bad(|c| c.photo_model = Some("missing".into()));
     }
 
     #[test]
@@ -332,6 +346,19 @@ mod tests {
         ] {
             assert_eq!(c.find_model(Some(no)), None, "{no}");
         }
+        // Pictures may have a usual model of their own; a named one still wins.
+        std::fs::write(d.path().join("sharp.onnx"), b"x").unwrap();
+        let two = Config {
+            photo_model: Some("sharp".into()),
+            ..c.clone()
+        };
+        assert_eq!(
+            two.find_photo_model(None),
+            Some(Some(d.path().join("sharp.onnx")))
+        );
+        assert_eq!(two.find_photo_model(Some("realesr_fp16")), file);
+        assert_eq!(two.find_model(None), file, "clips keep the other");
+        assert_eq!(c.find_photo_model(None), file);
         let none = good();
         assert_eq!(none.find_model(None), Some(None));
         assert_eq!(none.find_model(Some("realesr_fp16")), None);
