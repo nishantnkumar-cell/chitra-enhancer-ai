@@ -39,7 +39,16 @@ format first only loses detail.
 
 ## 3. The easy way: the window
 
-1. Choose your video, DVD or folder.
+1. Choose your video or DVD.
+2. Press **Find the 3 best options**. The program restores a few seconds in three
+   ways on your computer, shows them side by side, and says how long the whole
+   video would take with each. Play the samples, then press **Use these
+   settings** on the one you like and go to step 5. The *suggested* mark comes
+   from measurements of your video; it cannot judge which looks best, so trust
+   your eyes. The slider beside **Preview** sets the sample length (1 to 30 s).
+
+Or set things up yourself:
+
 2. Press **Analyse and suggest settings**. The program looks at a few places and
    fills in the settings, saying why.
 3. Press **Preview 5 s**. You get a before and after picture and a short clip. The
@@ -58,6 +67,15 @@ chitra-enhance -i tape.mp4 --analyze
 
 This prints suggested settings and a ready-made command. Add `--preview 5` to that
 command to try it first, then run it without.
+
+To compare three ways of restoring it:
+
+```
+chitra-enhance -i tape.mp4 --options
+```
+
+The samples go into a `tape-options` folder (`-o` picks another), and the command
+for each choice is printed. `--preview 10` makes the samples 10 seconds long.
 
 For a DVD:
 
@@ -88,7 +106,23 @@ chitra-enhance -i wedding.iso -o wedding/ --title all   # every title, into a fo
 ## 6. How long it takes
 
 It depends mostly on whether the AI runs on a graphics card. Always use the
-preview's estimate. As one measured example, on a laptop-class processor (Ryzen 7
+estimate from the three options or a preview.
+
+Measured on an NVIDIA RTX 4070 Ti under Windows (DirectML), standard-definition
+interlaced video enlarged 2x, in frames per second:
+
+| What is used | Frames per second | 30 minutes of tape |
+|---|---|---|
+| AI upscaler and five-frame AI denoiser, half precision (FP16) | 17 | about 45 minutes |
+| The same, full precision (FP32) | 9 | about 1 hour 25 minutes |
+| AI upscaler with the simple denoise filter, FP16 | 26 | about 30 minutes |
+
+The downloaded FP16 models are chosen on Windows by themselves; their pictures
+differ from FP32 by too little to see. Larger sizes are slower (1280 x 720 with
+both models: about 4 frames per second). The program uses large tiles when they
+fit; set **GPU memory** (`--vram-budget`) to your card's memory if it is under 8 GB.
+
+Without a graphics card it is far slower. As one measured example, on a laptop-class processor (Ryzen 7
 4700U) with **no** graphics acceleration, a 32-second standard-definition clip took:
 
 - about 4 minutes without AI, keeping both half-pictures;
@@ -98,8 +132,9 @@ At that speed an hour of tape with AI would take around two weeks. Without a
 supported graphics card, use the settings without the AI upscaler for long tapes,
 and keep AI for the parts you care most about.
 
-Graphics acceleration is built for NVIDIA cards, Windows (DirectML) and macOS.
-AMD and Intel graphics on Linux are not used yet.
+Graphics acceleration is built for NVIDIA cards, Windows (DirectML) and macOS. Of
+these only DirectML on an NVIDIA card has been tried on real hardware. AMD and
+Intel graphics on Linux are not used yet.
 
 ## 7. Stopping, resuming and disk space
 

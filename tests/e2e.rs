@@ -777,3 +777,72 @@ fn photo_mode_writes_16_bit_png_and_refuses_to_overwrite() {
     assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
     assert!(jxl.metadata().unwrap().len() > 0);
 }
+
+#[test]
+fn three_options_are_tried_on_a_sample_and_nothing_else_is_touched() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let input = d.path().join("tape.mp4");
+    make_clip(&input);
+    let before = std::fs::read(&input).unwrap();
+    // No models in this home, so the choices are three ways of cleaning.
+    let run = |extra: &[&str]| {
+        bin()
+            .env("HOME", d.path())
+            .env("USERPROFILE", d.path())
+            .env("LOCALAPPDATA", d.path())
+            .env_remove("XDG_DATA_HOME")
+            .arg("-i")
+            .arg(&input)
+            .args([
+                "--options",
+                "--preview",
+                "1",
+                "--codec",
+                "h264",
+                "--progress",
+            ])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let o = run(&[]);
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let found = out
+        .lines()
+        .find_map(chitra_enhance::job::parse_options)
+        .expect("an OPTIONS line");
+    assert_eq!(found.offers.len(), 3);
+    assert_eq!(
+        found.offers.iter().filter(|o| o.choice.recommended).count(),
+        1
+    );
+    for offer in &found.offers {
+        assert!(offer.speed.is_some(), "{:?}", offer.error);
+        // One second, enlarged 2x (more frames if both half-pictures are kept).
+        let (picture, count) = {
+            let s = frames(&offer.clip).0;
+            let (picture, count) = s.rsplit_once(',').unwrap();
+            (picture.to_string(), count.parse::<u32>().unwrap())
+        };
+        assert_eq!(picture, "320,240");
+        assert!((11..=30).contains(&count), "{count} frames");
+        assert!(offer.picture.is_file());
+    }
+    assert!(found.together.is_some_and(|p| p.is_file()));
+    // The samples are in a folder of their own; the full result was not made.
+    assert!(d.path().join("tape-options").is_dir());
+    assert!(!d.path().join("tape-enhanced.mp4").exists());
+    assert_eq!(std::fs::read(&input).unwrap(), before);
+    // Each choice comes with a command that carries the user's own settings.
+    assert_eq!(out.matches("To use it: chitra-enhance").count(), 3);
+    assert_eq!(out.matches("--codec h264").count(), 3);
+
+    let again = run(&[]);
+    assert!(!again.status.success());
+    assert!(String::from_utf8_lossy(&again.stderr).contains("--force"));
+    assert!(run(&["--force"]).status.success());
+}

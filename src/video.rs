@@ -420,6 +420,8 @@ pub struct Busy {
     pub enlarge: Duration,
     /// Waiting for ffmpeg to take the frames and encode them.
     pub encode: Duration,
+    /// From the start of the first chunk to its first finished frame.
+    pub startup: Duration,
 }
 
 impl std::fmt::Display for Busy {
@@ -570,6 +572,7 @@ fn run_chunk(
         .spawn()
         .context("cannot start the ffmpeg encoder")?;
 
+    let begun = Instant::now();
     let out = dec.stdout.take().context("no decoder output")?;
     let mut sink = enc.stdin.take().context("no encoder input")?;
     let mut frames = 0u64;
@@ -593,6 +596,9 @@ fn run_chunk(
                 break;
             }
             let started = Instant::now();
+            if busy.startup.is_zero() {
+                busy.startup = begun.elapsed();
+            }
             if sink.write_all(&better).is_err() {
                 // The encoder died: its own message is on screen.
                 encoder_gone = true;
@@ -718,6 +724,20 @@ pub struct Preview {
     pub compare: PathBuf,
     /// How long the whole video would take at the speed of this preview.
     pub whole: std::time::Duration,
+    /// Seconds before the first frame came out (loading and warming up).
+    pub startup: f64,
+    /// Seconds each further frame took.
+    pub per_frame: f64,
+}
+
+/// Splits a sample's time into the one-off start and the pace after it. Too few
+/// frames to tell them apart: it is all pace, which errs on the slow side.
+fn pace(total: f64, first: f64, frames: u64) -> (f64, f64) {
+    if frames >= 10 && first > 0.0 && first < total {
+        (first, (total - first) / (frames - 1) as f64)
+    } else {
+        (0.0, total / frames.max(1) as f64)
+    }
 }
 
 /// Processes only `secs` seconds from the middle of the video, with the real
@@ -749,9 +769,13 @@ pub fn preview(
         o, info, engine, temporal, start, dur, &part, &bar, &mut busy,
     )
     .inspect_err(|_| _ = std::fs::remove_file(&part))?;
-    let per_frame = started.elapsed().as_secs_f64() / made.max(1) as f64;
+    let (startup, per_frame) = pace(
+        started.elapsed().as_secs_f64(),
+        busy.startup.as_secs_f64(),
+        made,
+    );
     let all_frames = info.duration * f64::from(fn_) / f64::from(fd);
-    let whole = std::time::Duration::from_secs_f64(per_frame * all_frames);
+    let whole = std::time::Duration::from_secs_f64(startup + per_frame * all_frames);
 
     let mp4ish = matches!(ext(&o.output).as_str(), "mp4" | "m4v" | "mov");
     let mut cmd = Command::new(&o.tools.ffmpeg);
@@ -803,6 +827,8 @@ pub fn preview(
         clip: o.output.clone(),
         compare,
         whole,
+        startup,
+        per_frame,
     })
 }
 
@@ -1112,6 +1138,13 @@ mod tests {
         };
         let j = serde_json::to_string(&s).unwrap();
         assert_eq!(serde_json::from_str::<State>(&j).unwrap(), s);
+    }
+
+    #[test]
+    fn a_samples_slow_start_is_not_counted_for_every_frame() {
+        assert_eq!(pace(13.0, 3.0, 101), (3.0, 0.1));
+        assert_eq!(pace(10.0, 3.0, 5), (0.0, 2.0));
+        assert_eq!(pace(0.0, 0.0, 0), (0.0, 0.0));
     }
 
     #[test]

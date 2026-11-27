@@ -24,20 +24,30 @@ pub fn smaller_tile(tile: usize) -> Option<usize> {
     TILE_LADDER.iter().copied().find(|&t| t < tile)
 }
 
+/// The largest tile of the ladder whose `bytes_per_pixel` fit in `vram_mb`
+/// megabytes with a fifth to spare; the smallest if none does.
+fn largest_tile(vram_mb: usize, bytes_per_pixel: f64) -> usize {
+    let budget = vram_mb as f64 * 1024.0 * 1024.0 * 0.8;
+    TILE_LADDER
+        .into_iter()
+        .find(|&t| (t * t) as f64 * bytes_per_pixel <= budget)
+        .unwrap_or(TILE_LADDER[TILE_LADDER.len() - 1])
+}
+
 /// A first guess for the largest tile that fits `vram_mb` megabytes for a model
 /// that makes `scale`x larger pictures in `bytes` per sample (2 for FP16).
 /// A convolutional network keeps a few dozen feature maps alive; 48 channels at
 /// full resolution plus the enlarged output is a deliberately cautious model.
 pub fn tile_for_budget(vram_mb: usize, scale: usize, bytes: usize) -> usize {
-    let budget = vram_mb as f64 * 1024.0 * 1024.0 * 0.8;
-    for &t in &TILE_LADDER {
-        let px = (t * t) as f64;
-        let need = px * (48.0 * 6.0 + 3.0 * (scale * scale) as f64 * 2.0) * bytes as f64;
-        if need <= budget {
-            return t;
-        }
-    }
-    *TILE_LADDER.last().unwrap()
+    let per_pixel = (48 * 6 + 3 * scale * scale * 2) * bytes;
+    largest_tile(vram_mb, per_pixel as f64)
+}
+
+/// The same for the five-frame denoiser, which needs far more: about 1250
+/// samples a pixel, measured on DirectML. It leaves a quarter of the memory to
+/// the upscaler.
+pub fn denoiser_tile_for_budget(vram_mb: usize, bytes: usize) -> usize {
+    largest_tile(vram_mb / 4 * 3, (1250 * bytes) as f64)
 }
 
 /// Samples handed to one thread at a time by the conversions below.
@@ -205,6 +215,15 @@ mod tests {
         assert_eq!(big, 1024);
         assert_eq!(tile_for_budget(1024, 2, 4), 768);
         assert_eq!(tiny, 128);
+    }
+
+    #[test]
+    fn the_denoiser_gets_a_tile_that_fits_beside_the_upscaler() {
+        // A standard definition frame (768 x 576) stays whole from 8 GB up.
+        assert_eq!(denoiser_tile_for_budget(8 * 1024, 4), 768);
+        assert_eq!(denoiser_tile_for_budget(8 * 1024, 2), 1024);
+        assert_eq!(denoiser_tile_for_budget(4 * 1024, 4), 512);
+        assert_eq!(denoiser_tile_for_budget(256, 4), 128);
     }
 
     #[test]

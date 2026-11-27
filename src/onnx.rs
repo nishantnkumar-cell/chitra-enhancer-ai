@@ -22,8 +22,8 @@ use rayon::prelude::*;
 
 use crate::engine::Engine;
 use crate::infer::{
-    BLOCK, byte, chw_from_rgb8, from_chw, overlap_for, plane_from_rgb8, rgb8_from_chw,
-    rgb8_from_plane, smaller_tile, tile_for_budget, to_chw,
+    BLOCK, byte, chw_from_rgb8, denoiser_tile_for_budget, from_chw, overlap_for, plane_from_rgb8,
+    rgb8_from_chw, rgb8_from_plane, smaller_tile, tile_for_budget, to_chw,
 };
 use crate::temporal::{FRAMES, Temporal, stack};
 use crate::tiler::{Plane, map_tiled, round_up, upscale_tiled};
@@ -465,9 +465,8 @@ impl OnnxDenoiser {
                 ..
             }
         );
-        // Five frames in and two U-Net stages: roughly 4x the memory of an upscaler tile.
         let tile = tile.map_or_else(
-            || tile_for_budget(vram_mb / 3, 1, if half { 2 } else { 4 }),
+            || denoiser_tile_for_budget(vram_mb, if half { 2 } else { 4 }),
             |t| t.clamp(64, 1024),
         );
         Ok(OnnxDenoiser {

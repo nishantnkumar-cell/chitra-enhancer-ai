@@ -8,6 +8,8 @@ Nothing is uploaded.
 - Deinterlacing, noise removal (including a five-frame AI denoiser), an AI
   upscaler, tape repairs (colour line-up, edge outlines), cropping.
 - DVD images, drives and folders (discs without copy protection only).
+- **Three options to choose from:** your own footage restored three ways, side by
+  side, with the time each would take.
 - Suggested settings from samples of your footage; previews with a time estimate.
 - Stop and carry on later; whole folders; photos to 16-bit JPEG XL or PNG.
 - A window and a command line.
@@ -20,9 +22,11 @@ Nothing is uploaded.
 
 ### What has been tested
 
-- Tested by hand on Linux, on the processor only. Windows and macOS downloads are
-  built and pass the automated tests, but have not been used by hand.
-- **Graphics card acceleration has not yet been tested on real hardware.**
+- On Linux by hand, on the processor only.
+- On Windows 11 from the command line with an NVIDIA RTX 4070 Ti (DirectML):
+  standard definition, both AI models, about 17 frames per second.
+- **Not tried on real hardware:** the Windows window, macOS, CUDA, and AMD or Intel
+  graphics.
 - Without a graphics card the AI upscaler is very slow: about 3 hours for a
   32-second standard-definition clip on a laptop-class processor.
 
