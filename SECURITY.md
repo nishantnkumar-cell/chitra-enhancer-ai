@@ -27,6 +27,9 @@ files you ask for. It treats these as **untrusted** and bounds them:
   Windows), so pasting a suggested command cannot run anything hidden in a name.
 - **ffmpeg / ffprobe.** Started as separate programs with argument lists (never a
   shell); paths are made absolute so a name starting with `-` is not an option.
+- **No usage reporting.** ONNX Runtime's reporting, which Microsoft's Windows
+  builds switch on by default, is turned off. The program connects to the network
+  only to download models when asked.
 - **Downloaded model files.** Fetched over HTTPS only, size-limited, and checked
   against a SHA-256 built into the program; a mismatch is deleted.
 - **Your own models and ONNX Runtime.** A model is a program for the inference

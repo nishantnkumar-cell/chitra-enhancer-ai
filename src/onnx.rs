@@ -423,6 +423,9 @@ fn environment() -> Result<Arc<Environment>> {
     let env = Arc::new(
         ort::init_from(lib)
             .map_err(|e| anyhow!("cannot load ONNX Runtime: {e}"))?
+            // Microsoft's Windows builds report usage unless told not to.
+            // Nothing about the user's work leaves this computer.
+            .with_telemetry(false)
             .build()?,
     );
     *slot = Some(Arc::clone(&env));
