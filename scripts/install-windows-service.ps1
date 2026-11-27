@@ -20,6 +20,9 @@
   `chitra-enhance models list` shows).
 .PARAMETER Model
   The model used when a sender asks for none, by file name without .onnx.
+.PARAMETER PhotoModel
+  A different usual model for pictures (clips keep -Model), by file name without
+  .onnx. Left out, an earlier installation's choice is kept; "" removes it.
 .PARAMETER Port
   The port to listen on. Default 8765.
 #>
@@ -27,6 +30,7 @@ param(
   [string]$Program = $PSScriptRoot,
   [Parameter(Mandatory = $true)][string]$Models,
   [string]$Model = "realesr-general-x4v3_fp16",
+  [AllowEmptyString()][string]$PhotoModel,
   [ValidateRange(1024, 65535)][int]$Port = 8765
 )
 $ErrorActionPreference = "Stop"
@@ -43,6 +47,8 @@ foreach ($f in "chitra-enhance.exe", "onnxruntime.dll", "ffmpeg.exe", "ffprobe.e
   if (-not (Test-Path (Join-Path $Program $f))) { throw "$f is not in $Program" }
 }
 if (-not (Test-Path (Join-Path $Models "$Model.onnx"))) { throw "$Model.onnx is not in $Models" }
+
+if ($PhotoModel -and -not (Test-Path (Join-Path $Models "$PhotoModel.onnx"))) { throw "$PhotoModel.onnx is not in $Models" }
 
 $tailscale = Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"
 if (-not (Test-Path $tailscale)) { throw "Tailscale is not installed." }
@@ -64,9 +70,13 @@ foreach ($extra in "LICENSE", "THIRD_PARTY_LICENCES.txt", "MODEL_LICENCES.md", "
 Copy-Item (Join-Path $Models "*.onnx") "$state\models" -Force
 $exe = Join-Path $target "chitra-enhance.exe"
 
-# Keep the key of an earlier installation.
+# Keep the key (and the picture model) of an earlier installation.
 $key = $null
-if (Test-Path $config) { $key = (Get-Content $config -Raw | ConvertFrom-Json).key }
+if (Test-Path $config) {
+  $before = Get-Content $config -Raw | ConvertFrom-Json
+  $key = $before.key
+  if (-not $PSBoundParameters.ContainsKey("PhotoModel")) { $PhotoModel = $before.photo_model }
+}
 if (-not $key) { $key = (& $exe new-key).Trim() }
 
 if (-not (Get-Service $name -ErrorAction SilentlyContinue)) {
@@ -97,6 +107,7 @@ $settings = [ordered]@{
   runtime = "$target\onnxruntime.dll"
   log     = "$state\service.log"
 }
+if ($PhotoModel) { $settings["photo_model"] = $PhotoModel }
 # UTF-8; the program accepts the byte order mark Windows adds.
 $settings | ConvertTo-Json | Set-Content $config -Encoding UTF8
 

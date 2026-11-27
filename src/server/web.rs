@@ -143,7 +143,11 @@ struct Settings {
 }
 
 impl Settings {
-    fn check(&self, config: &Config) -> Result<(usize, Option<PathBuf>, f32), &'static str> {
+    fn check(
+        &self,
+        config: &Config,
+        picture: bool,
+    ) -> Result<(usize, Option<PathBuf>, f32), &'static str> {
         let scale = self.scale.unwrap_or(config.scale);
         if ![1, 2, 4].contains(&scale) {
             return Err("scale must be 1, 2 or 4");
@@ -152,9 +156,13 @@ impl Settings {
         if !(0.1..=3.0).contains(&quality) {
             return Err("quality must be 0.1 to 3.0 (smaller is better)");
         }
-        let model = config
-            .find_model(self.model.as_deref())
-            .ok_or("there is no such model")?;
+        let wanted = self.model.as_deref();
+        let model = if picture {
+            config.find_photo_model(wanted)
+        } else {
+            config.find_model(wanted)
+        }
+        .ok_or("there is no such model")?;
         Ok((scale, model, quality))
     }
 }
@@ -207,7 +215,7 @@ fn queued(app: &App, work: Work) -> Result<(), Box<Response>> {
 }
 
 async fn photo(State(app): Shared, Query(wanted): Query<Settings>, mut body: Body) -> Response {
-    let (scale, model, distance) = match wanted.check(&app.config) {
+    let (scale, model, distance) = match wanted.check(&app.config, true) {
         Ok(v) => v,
         Err(e) => return refuse_upload(body, StatusCode::BAD_REQUEST, e).await,
     };
@@ -305,7 +313,7 @@ async fn receive(
 }
 
 async fn clip(State(app): Shared, Query(wanted): Query<Settings>, mut body: Body) -> Response {
-    let (scale, model, _) = match wanted.check(&app.config) {
+    let (scale, model, _) = match wanted.check(&app.config, false) {
         Ok(v) => v,
         Err(e) => return refuse_upload(body, StatusCode::BAD_REQUEST, e).await,
     };
