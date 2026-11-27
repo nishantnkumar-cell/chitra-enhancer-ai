@@ -351,6 +351,7 @@ dependencies = [
  "jxl-encoder",
  "ort",
  "png",
+ "rayon",
  "rfd",
  "serde",
  "serde_json",
@@ -869,6 +870,7 @@ dependencies = [
  "cfg-if",
  "document-features",
  "num-traits",
+ "rayon",
  "thiserror 2.0.21",
 ]
 

@@ -13,14 +13,17 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::ValueEnum;
 use half::f16;
+use half::slice::HalfFloatSliceExt;
 use ort::environment::Environment;
 use ort::ep::{self, ExecutionProviderDispatch};
 use ort::session::Session;
 use ort::value::{Tensor, TensorElementType, ValueType};
+use rayon::prelude::*;
 
 use crate::engine::Engine;
 use crate::infer::{
-    from_chw, overlap_for, plane_from_rgb8, rgb8_from_plane, smaller_tile, tile_for_budget, to_chw,
+    BLOCK, from_chw, overlap_for, plane_from_rgb8, rgb8_from_plane, smaller_tile, tile_for_budget,
+    to_chw,
 };
 use crate::temporal::{FRAMES, Temporal, stack};
 use crate::tiler::{Plane, map_tiled, upscale_tiled};
@@ -79,6 +82,17 @@ fn build_session(env: &Environment, path: &Path, device: Device) -> Result<(Sess
             let mut b = Session::builder(env)?
                 .with_execution_providers([p.error_on_failure()])
                 .map_err(|e| -> ort::Error { e.into() })?;
+            // Idle model threads sleep instead of spinning: the stages of the
+            // video pipeline run at the same time and share the processor.
+            b = b
+                .with_config_entry("session.intra_op.allow_spinning", "0")
+                .map_err(|e| -> ort::Error { e.into() })?;
+            if name == "DirectML" {
+                // DirectML does not support ONNX Runtime's memory planning.
+                b = b
+                    .with_memory_pattern(false)
+                    .map_err(|e| -> ort::Error { e.into() })?;
+            }
             b.commit_from_file(path)
         })();
         match built {
@@ -96,9 +110,28 @@ fn build_session(env: &Environment, path: &Path, device: Device) -> Result<(Sess
 fn is_out_of_memory(e: &ort::Error) -> bool {
     let m = e.to_string().to_ascii_lowercase();
     m.contains("out of memory")
+        || m.contains("not enough memory")
+        || m.contains("8007000e")
         || m.contains("failed to allocate")
         || m.contains("bad_alloc")
         || m.contains("oom")
+}
+
+/// Half precision for a model that wants it, converted on every core.
+fn to_half(v: &[f32]) -> Vec<f16> {
+    let mut out = vec![f16::ZERO; v.len()];
+    out.par_chunks_mut(BLOCK)
+        .zip(v.par_chunks(BLOCK))
+        .for_each(|(o, i)| o.convert_from_f32_slice(i));
+    out
+}
+
+fn from_half(v: &[f16]) -> Vec<f32> {
+    let mut out = vec![0.0f32; v.len()];
+    out.par_chunks_mut(BLOCK)
+        .zip(v.par_chunks(BLOCK))
+        .for_each(|(o, i)| i.convert_to_f32_slice(o));
+    out
 }
 
 impl OnnxEngine {
@@ -168,26 +201,23 @@ impl OnnxEngine {
     fn run_tile(&mut self, t: &Plane) -> Result<Plane> {
         let shape = [1i64, t.c as i64, t.h as i64, t.w as i64];
         let chw = to_chw(t);
-        let (out_w, out_h);
-        let flat: Vec<f32> = if self.half {
-            let data: Vec<f16> = chw.iter().map(|&v| f16::from_f32(v)).collect();
-            let input = Tensor::from_array((shape, data))?;
+        if self.half {
+            let input = Tensor::from_array((shape, to_half(&chw)))?;
             let outs = self
                 .session
                 .run(ort::inputs![self.in_name.as_str() => input])?;
             let (s, d) = outs[self.out_name.as_str()].try_extract_tensor::<f16>()?;
-            (out_h, out_w) = (s[2] as usize, s[3] as usize);
-            d.iter().map(|v| v.to_f32()).collect()
+            let (h, w) = (s[2] as usize, s[3] as usize);
+            Ok(from_chw(&from_half(d), w, h, t.c))
         } else {
             let input = Tensor::from_array((shape, chw))?;
             let outs = self
                 .session
                 .run(ort::inputs![self.in_name.as_str() => input])?;
             let (s, d) = outs[self.out_name.as_str()].try_extract_tensor::<f32>()?;
-            (out_h, out_w) = (s[2] as usize, s[3] as usize);
-            d.to_vec()
-        };
-        Ok(from_chw(&flat, out_w, out_h, t.c))
+            let (h, w) = (s[2] as usize, s[3] as usize);
+            Ok(from_chw(d, w, h, t.c))
+        }
     }
 
     /// Runs the model over a whole frame, stepping the tile size down (with a
@@ -323,26 +353,25 @@ impl OnnxDenoiser {
     fn run_tile(&mut self, t: &Plane) -> Result<Plane> {
         let (w, h) = (t.w as i64, t.h as i64);
         let chw = to_chw(t);
-        let sig = vec![self.sigma / 255.0; t.w * t.h];
+        let level = self.sigma / 255.0;
         let (fs, ss) = ([1i64, (3 * FRAMES) as i64, h, w], [1i64, 1, h, w]);
-        let flat: Vec<f32> = if self.half {
-            let f: Vec<f16> = chw.iter().map(|&v| f16::from_f32(v)).collect();
-            let n: Vec<f16> = sig.iter().map(|&v| f16::from_f32(v)).collect();
+        if self.half {
+            let n = vec![f16::from_f32(level); t.w * t.h];
             let outs = self.session.run(ort::inputs![
-                "frames" => Tensor::from_array((fs, f))?,
+                "frames" => Tensor::from_array((fs, to_half(&chw)))?,
                 "sigma" => Tensor::from_array((ss, n))?
             ])?;
             let (_, d) = outs[0].try_extract_tensor::<f16>()?;
-            d.iter().map(|v| v.to_f32()).collect()
+            Ok(from_chw(&from_half(d), t.w, t.h, 3))
         } else {
+            let n = vec![level; t.w * t.h];
             let outs = self.session.run(ort::inputs![
                 "frames" => Tensor::from_array((fs, chw))?,
-                "sigma" => Tensor::from_array((ss, sig))?
+                "sigma" => Tensor::from_array((ss, n))?
             ])?;
             let (_, d) = outs[0].try_extract_tensor::<f32>()?;
-            d.to_vec()
-        };
-        Ok(from_chw(&flat, t.w, t.h, 3))
+            Ok(from_chw(d, t.w, t.h, 3))
+        }
     }
 }
 

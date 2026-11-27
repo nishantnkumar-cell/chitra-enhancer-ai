@@ -12,7 +12,9 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Instant, UNIX_EPOCH};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::thread::ScopedJoinHandle;
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
@@ -131,6 +133,7 @@ pub struct Summary {
     /// Chunks found complete from an earlier run.
     pub resumed: usize,
     pub seconds: f64,
+    pub busy: Busy,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -403,17 +406,128 @@ fn kill(children: &mut [&mut Child]) {
     }
 }
 
+/// Frames that may wait between two stages: enough to ride out an uneven one
+/// without holding much memory.
+const QUEUE: usize = 3;
+
+/// How long each stage was working (not waiting for another one). The stages
+/// run at the same time, so the longest one sets the speed.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Busy {
+    /// Waiting for ffmpeg to decode and filter.
+    pub decode: Duration,
+    pub denoise: Duration,
+    pub enlarge: Duration,
+    /// Waiting for ffmpeg to take the frames and encode them.
+    pub encode: Duration,
+}
+
+impl std::fmt::Display for Busy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "decoding {:.0} s, AI denoising {:.0} s, enlarging {:.0} s, encoding {:.0} s",
+            self.decode.as_secs_f64(),
+            self.denoise.as_secs_f64(),
+            self.enlarge.as_secs_f64(),
+            self.encode.as_secs_f64()
+        )
+    }
+}
+
+/// Decoder to the next stage, until the stream ends or nobody is listening.
+fn read_stage(mut from: impl Read, len: usize, to: SyncSender<Vec<u8>>) -> Result<Duration> {
+    let mut busy = Duration::ZERO;
+    while !STOP.load(Ordering::Relaxed) {
+        let mut frame = vec![0u8; len];
+        let started = Instant::now();
+        let got = read_frame(&mut from, &mut frame)?;
+        busy += started.elapsed();
+        if !got || to.send(frame).is_err() {
+            break;
+        }
+    }
+    Ok(busy)
+}
+
+/// The five-frame denoiser. Its frames trail the decoder by a couple, and the
+/// last ones come out when the input ends.
+fn denoise_stage(
+    t: &mut dyn Temporal,
+    (w, h): (usize, usize),
+    from: Receiver<Vec<u8>>,
+    to: SyncSender<Vec<u8>>,
+) -> Result<Duration> {
+    let mut busy = Duration::ZERO;
+    let mut win = Window::new();
+    loop {
+        let frame = from.recv().ok();
+        if STOP.load(Ordering::Relaxed) {
+            return Ok(busy);
+        }
+        let last = frame.is_none();
+        let started = Instant::now();
+        if let Some(f) = frame {
+            win.push(plane_from_rgb8(&f, w, h));
+        }
+        busy += started.elapsed();
+        loop {
+            let started = Instant::now();
+            let Some(around) = win.next(last) else {
+                break;
+            };
+            let clean = rgb8_from_plane(&t.denoise(&around)?);
+            win.advance();
+            busy += started.elapsed();
+            if to.send(clean).is_err() {
+                return Ok(busy);
+            }
+        }
+        if last {
+            return Ok(busy);
+        }
+    }
+}
+
+fn enlarge_stage(
+    engine: &mut dyn Engine,
+    (w, h): (usize, usize),
+    from: Receiver<Vec<u8>>,
+    to: SyncSender<Vec<u8>>,
+) -> Result<Duration> {
+    let mut busy = Duration::ZERO;
+    for frame in from {
+        if STOP.load(Ordering::Relaxed) {
+            break;
+        }
+        let started = Instant::now();
+        let better = engine.process(&frame, w, h)?;
+        busy += started.elapsed();
+        if to.send(better).is_err() {
+            break;
+        }
+    }
+    Ok(busy)
+}
+
+fn finished<T>(stage: ScopedJoinHandle<'_, T>) -> T {
+    stage
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
 /// Decodes, improves and encodes one chunk into `part`; returns its frame count.
 #[allow(clippy::too_many_arguments)]
 fn run_chunk(
     o: &Options,
     info: &VideoInfo,
     engine: &mut dyn Engine,
-    mut temporal: Option<&mut (dyn Temporal + 'static)>,
+    temporal: Option<&mut (dyn Temporal + 'static)>,
     start: f64,
     dur: f64,
     part: &Path,
     bar: &ProgressBar,
+    busy: &mut Busy,
 ) -> Result<u64> {
     let (w, h) = o.frame_size(info);
     let s = engine.scale();
@@ -456,69 +570,66 @@ fn run_chunk(
         .spawn()
         .context("cannot start the ffmpeg encoder")?;
 
-    let mut out = dec.stdout.take().context("no decoder output")?;
+    let out = dec.stdout.take().context("no decoder output")?;
     let mut sink = enc.stdin.take().context("no encoder input")?;
-    let mut frame = vec![0u8; w * h * 3];
     let mut frames = 0u64;
-    let mut win = Window::new();
-    'frames: loop {
-        if STOP.load(Ordering::Relaxed) {
-            kill(&mut [&mut dec, &mut enc]);
-            let _ = std::fs::remove_file(part);
-            return Err(Stopped {
-                chunks_done: 0,
-                chunks_total: 0,
+    let mut encoder_gone = false;
+    let worked: Result<()> = std::thread::scope(|s| {
+        let (raw_to, raw) = sync_channel(QUEUE);
+        let (big_to, big) = sync_channel::<Vec<u8>>(QUEUE);
+        let reader = s.spawn(move || read_stage(out, w * h * 3, raw_to));
+        let (cleaner, clean) = match temporal {
+            Some(t) => {
+                let (clean_to, clean) = sync_channel(QUEUE);
+                let stage = s.spawn(move || denoise_stage(t, (w, h), raw, clean_to));
+                (Some(stage), clean)
             }
-            .into());
-        }
-        let got = match read_frame(&mut out, &mut frame) {
-            Ok(g) => g,
-            Err(e) => {
-                kill(&mut [&mut dec, &mut enc]);
-                return Err(e);
-            }
+            None => (None, raw),
         };
-        // Frames ready to be enlarged. With a temporal denoiser they trail the
-        // decoder by a couple of frames and the last ones come out at the end.
-        let mut ready: Vec<Vec<u8>> = Vec::new();
-        if let Some(t) = temporal.as_deref_mut() {
-            if got {
-                win.push(plane_from_rgb8(&frame, w, h));
+        let enlarger = s.spawn(move || enlarge_stage(engine, (w, h), clean, big_to));
+        // Leaving this loop drops `big`, which stops the stages one by one.
+        for better in big {
+            if STOP.load(Ordering::Relaxed) {
+                break;
             }
-            while let Some(around) = win.next(!got) {
-                match t.denoise(&around) {
-                    Ok(p) => ready.push(rgb8_from_plane(&p)),
-                    Err(e) => {
-                        kill(&mut [&mut dec, &mut enc]);
-                        return Err(e);
-                    }
-                }
-                win.advance();
-            }
-        } else if got {
-            ready.push(frame.clone());
-        }
-        for clean in &ready {
-            let better = match engine.process(clean, w, h) {
-                Ok(b) => b,
-                Err(e) => {
-                    kill(&mut [&mut dec, &mut enc]);
-                    return Err(e);
-                }
-            };
+            let started = Instant::now();
             if sink.write_all(&better).is_err() {
                 // The encoder died: its own message is on screen.
-                break 'frames;
+                encoder_gone = true;
+                break;
             }
+            busy.encode += started.elapsed();
             frames += 1;
             bar.inc(1);
             report(bar);
         }
-        if !got {
-            break;
-        }
-    }
+        let enlarged = finished(enlarger);
+        let cleaned = cleaner.map(finished).transpose();
+        let read = finished(reader);
+        busy.enlarge += enlarged?;
+        busy.denoise += cleaned?.unwrap_or_default();
+        busy.decode += read?;
+        Ok(())
+    });
     drop(sink);
+    if STOP.load(Ordering::Relaxed) {
+        kill(&mut [&mut dec, &mut enc]);
+        let _ = std::fs::remove_file(part);
+        return Err(Stopped {
+            chunks_done: 0,
+            chunks_total: 0,
+        }
+        .into());
+    }
+    if let Err(e) = worked {
+        kill(&mut [&mut dec, &mut enc]);
+        return Err(e);
+    }
+    if encoder_gone {
+        kill(&mut [&mut dec]);
+        let e = enc.wait()?;
+        bail!("the ffmpeg encoder failed ({e})");
+    }
     let d = dec.wait()?;
     let e = enc.wait()?;
     if !d.success() {
@@ -633,8 +744,11 @@ pub fn preview(
     let bar = ProgressBar::with_draw_target(Some(total), indicatif::ProgressDrawTarget::hidden());
     let part = o.output.with_extension("preview.part.mkv");
     let started = Instant::now();
-    let made = run_chunk(o, info, engine, temporal, start, dur, &part, &bar)
-        .inspect_err(|_| _ = std::fs::remove_file(&part))?;
+    let mut busy = Busy::default();
+    let made = run_chunk(
+        o, info, engine, temporal, start, dur, &part, &bar, &mut busy,
+    )
+    .inspect_err(|_| _ = std::fs::remove_file(&part))?;
     let per_frame = started.elapsed().as_secs_f64() / made.max(1) as f64;
     let all_frames = info.duration * f64::from(fn_) / f64::from(fd);
     let whole = std::time::Duration::from_secs_f64(per_frame * all_frames);
@@ -765,6 +879,7 @@ pub fn run(
     }
 
     let mut frames = 0u64;
+    let mut busy = Busy::default();
     let mut this_run = 0usize;
     for i in 0..chunks {
         if state.done.contains(&i) {
@@ -791,6 +906,7 @@ pub fn run(
             dur,
             &part,
             &bar,
+            &mut busy,
         ) {
             Ok(n) => frames += n,
             Err(e) if e.downcast_ref::<Stopped>().is_some() => {
@@ -824,6 +940,7 @@ pub fn run(
         chunks,
         resumed,
         seconds: started.elapsed().as_secs_f64(),
+        busy,
     })
 }
 

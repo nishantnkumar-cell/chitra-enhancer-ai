@@ -8,6 +8,7 @@
 use std::collections::VecDeque;
 
 use anyhow::Result;
+use rayon::prelude::*;
 
 use crate::tiler::Plane;
 
@@ -16,7 +17,7 @@ pub const REACH: usize = 2;
 /// Frames the model sees at once.
 pub const FRAMES: usize = 2 * REACH + 1;
 
-pub trait Temporal {
+pub trait Temporal: Send {
     /// Cleans `w[REACH]` using its neighbours; all five are the same size.
     fn denoise(&mut self, w: &[&Plane; FRAMES]) -> Result<Plane>;
     fn describe(&self) -> String;
@@ -109,12 +110,25 @@ impl Window {
 pub fn stack(w: &[&Plane; FRAMES]) -> Plane {
     let (pw, ph) = (w[0].w, w[0].h);
     let mut out = Plane::new(pw, ph, 3 * FRAMES);
-    for i in 0..pw * ph {
-        for (f, p) in w.iter().enumerate() {
-            out.data[i * 3 * FRAMES + f * 3..i * 3 * FRAMES + f * 3 + 3]
-                .copy_from_slice(&p.data[i * 3..i * 3 + 3]);
-        }
+    if out.data.is_empty() {
+        return out;
     }
+    out.data
+        .par_chunks_mut(pw * 3 * FRAMES)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for (x, px) in row
+                .as_chunks_mut::<{ 3 * FRAMES }>()
+                .0
+                .iter_mut()
+                .enumerate()
+            {
+                let i = (y * pw + x) * 3;
+                for (f, p) in w.iter().enumerate() {
+                    px[f * 3..f * 3 + 3].copy_from_slice(&p.data[i..i + 3]);
+                }
+            }
+        });
     out
 }
 

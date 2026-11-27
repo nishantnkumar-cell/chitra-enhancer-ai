@@ -1,6 +1,8 @@
 //! The parts of running a model that need no ONNX Runtime: how a frame is laid
 //! out as a tensor, half-precision conversion, and how big a tile may be.
 
+use rayon::prelude::*;
+
 use crate::tiler::Plane;
 
 /// Tile sizes to try, largest first. After an out-of-memory error the next
@@ -37,17 +39,24 @@ pub fn tile_for_budget(vram_mb: usize, scale: usize, bytes: usize) -> usize {
     *TILE_LADDER.last().unwrap()
 }
 
+/// Samples handed to one thread at a time by the conversions below.
+pub const BLOCK: usize = 1 << 14;
+
 /// The Plane (interleaved HWC) as planar CHW, the layout models expect.
 pub fn to_chw(p: &Plane) -> Vec<f32> {
     let (w, h, c) = (p.w, p.h, p.c);
     let mut out = vec![0.0f32; w * h * c];
-    for y in 0..h {
-        for x in 0..w {
-            for k in 0..c {
-                out[k * w * h + y * w + x] = p.data[(y * w + x) * c + k];
-            }
-        }
+    if out.is_empty() {
+        return out;
     }
+    // One row of one channel at a time: row `i` is row `i % h` of channel `i / h`.
+    out.par_chunks_mut(w).enumerate().for_each(|(i, row)| {
+        let (k, y) = (i / h, i % h);
+        let src = &p.data[y * w * c..(y + 1) * w * c];
+        for (o, px) in row.iter_mut().zip(src.chunks_exact(c)) {
+            *o = px[k];
+        }
+    });
     out
 }
 
@@ -56,32 +65,47 @@ pub fn to_chw(p: &Plane) -> Vec<f32> {
 pub fn from_chw(data: &[f32], w: usize, h: usize, c: usize) -> Plane {
     assert_eq!(data.len(), w * h * c);
     let mut p = Plane::new(w, h, c);
-    for y in 0..h {
-        for x in 0..w {
-            for k in 0..c {
-                p.data[(y * w + x) * c + k] = data[k * w * h + y * w + x].clamp(0.0, 1.0);
-            }
-        }
+    if data.is_empty() {
+        return p;
     }
+    p.data
+        .par_chunks_mut(w * c)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for k in 0..c {
+                let src = &data[(k * h + y) * w..][..w];
+                for (px, v) in row.chunks_exact_mut(c).zip(src) {
+                    px[k] = v.clamp(0.0, 1.0);
+                }
+            }
+        });
     p
 }
 
 /// 8-bit RGB (interleaved) to a Plane in 0..=1. The models are trained on
 /// gamma-encoded sRGB, so no linearisation is done.
 pub fn plane_from_rgb8(rgb: &[u8], w: usize, h: usize) -> Plane {
-    Plane {
-        w,
-        h,
-        c: 3,
-        data: rgb.iter().map(|&v| f32::from(v) / 255.0).collect(),
-    }
+    let mut data = vec![0.0f32; rgb.len()];
+    data.par_chunks_mut(BLOCK)
+        .zip(rgb.par_chunks(BLOCK))
+        .for_each(|(out, src)| {
+            for (o, &v) in out.iter_mut().zip(src) {
+                *o = f32::from(v) / 255.0;
+            }
+        });
+    Plane { w, h, c: 3, data }
 }
 
 pub fn rgb8_from_plane(p: &Plane) -> Vec<u8> {
-    p.data
-        .iter()
-        .map(|&v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
-        .collect()
+    let mut out = vec![0u8; p.data.len()];
+    out.par_chunks_mut(BLOCK)
+        .zip(p.data.par_chunks(BLOCK))
+        .for_each(|(out, src)| {
+            for (o, v) in out.iter_mut().zip(src) {
+                *o = (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            }
+        });
+    out
 }
 
 #[cfg(test)]

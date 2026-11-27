@@ -809,6 +809,7 @@ fn run_one(mut a: Args) -> Result<()> {
         s.seconds,
         o.output.display()
     );
+    eprintln!("Time at work, stages overlapping: {}", s.busy);
     Ok(())
 }
 
