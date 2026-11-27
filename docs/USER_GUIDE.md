@@ -108,19 +108,41 @@ chitra-enhance -i wedding.iso -o wedding/ --title all   # every title, into a fo
 It depends mostly on whether the AI runs on a graphics card. Always use the
 estimate from the three options or a preview.
 
-Measured on an NVIDIA RTX 4070 Ti under Windows (DirectML), standard-definition
-interlaced video enlarged 2x, in frames per second:
+Measured on an NVIDIA RTX 4070 Ti under Windows, standard-definition interlaced
+video enlarged 2x with the half-precision (FP16) models, in frames per second:
 
-| What is used | Frames per second | 30 minutes of tape |
-|---|---|---|
-| AI upscaler and five-frame AI denoiser, half precision (FP16) | 17 | about 45 minutes |
-| The same, full precision (FP32) | 9 | about 1 hour 25 minutes |
-| AI upscaler with the simple denoise filter, FP16 | 26 | about 30 minutes |
+| What is used | DirectML | 30 minutes of tape | TensorRT (below) | 30 minutes of tape |
+|---|---|---|---|---|
+| AI upscaler and five-frame AI denoiser | 23 | about 32 minutes | 28 | about 27 minutes |
+| AI upscaler with the simple denoise filter | 35 | about 21 minutes | a little faster once running | |
 
-The downloaded FP16 models are chosen on Windows by themselves; their pictures
-differ from FP32 by too little to see. Larger sizes are slower (1280 x 720 with
-both models: about 4 frames per second). The program uses large tiles when they
+The downloaded FP16 models are chosen on Windows by themselves; full precision
+(FP32) is about half the speed and looks the same. 1280 x 720 with both models
+runs at about 6 to 7 frames per second. The program uses large tiles when they
 fit; set **GPU memory** (`--vram-budget`) to your card's memory if it is under 8 GB.
+
+### Faster on NVIDIA RTX cards (optional)
+
+NVIDIA's TensorRT RTX engine (RTX 30 series or newer) was about a fifth faster
+than DirectML with both AI models. It starts more slowly, by a few seconds and once by
+half a minute at a new picture size, so it pays off on longer videos. Its
+pictures match DirectML's. It is NVIDIA's software under NVIDIA's licence and is
+not part of this program. To use it, put these files together in one new folder
+(the downloads are ZIP files, whatever their names end in):
+
+1. `onnxruntime.dll` and `onnxruntime_providers_shared.dll`, version 1.25 to
+   1.30 (1.30.0 was tested), from `runtimes/win-x64/native` in the
+   [Microsoft.ML.OnnxRuntime package](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime/1.30.0).
+2. All the DLLs from `TensorRT-RTX-EP-ABI-v0.5.0-cu12.zip` in
+   [NVIDIA's plugin release](https://github.com/NVIDIA/TensorRT-RTX-EP-ABI/releases/tag/v0.5.0).
+3. `cudart64_12.dll` from NVIDIA's
+   [CUDA runtime package](https://pypi.org/project/nvidia-cuda-runtime-cu12/#files)
+   (the `win_amd64` file).
+
+Then set `ORT_DYLIB_PATH` (in the window: **ONNX Runtime library**) to that
+`onnxruntime.dll`. The program finds the plugin beside it and uses it; the log
+says `on TensorRT`. This runtime has no DirectML, so a model TensorRT cannot run
+falls back to the processor: go back to your DirectML runtime for such a model.
 
 Without a graphics card it is far slower. As one measured example, on a laptop-class processor (Ryzen 7
 4700U) with **no** graphics acceleration, a 32-second standard-definition clip took:
@@ -133,8 +155,9 @@ supported graphics card, use the settings without the AI upscaler for long tapes
 and keep AI for the parts you care most about.
 
 Graphics acceleration is built for NVIDIA cards, Windows (DirectML) and macOS. Of
-these only DirectML on an NVIDIA card has been tried on real hardware. AMD and
-Intel graphics on Linux are not used yet.
+these, DirectML and TensorRT on an NVIDIA card under Windows have been tried on
+real hardware; CUDA, Core ML and TensorRT on Linux have not. AMD and Intel
+graphics on Linux are not used yet.
 
 ## 7. Stopping, resuming and disk space
 

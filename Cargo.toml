@@ -17,7 +17,7 @@ half = { version = "2.7.1", optional = true }
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "bmp", "webp", "tiff"] }
 indicatif = "0.18.6"
 jxl-encoder = { version = "0.3.1", default-features = false, features = ["std", "parallel"] }
-ort = { version = "2.0.0-rc.15", default-features = false, features = ["load-dynamic", "ndarray", "half", "cuda", "directml", "coreml"], optional = true }
+ort = { version = "2.0.0-rc.15", default-features = false, features = ["load-dynamic", "api-22", "ndarray", "half", "cuda", "directml", "coreml"], optional = true }
 png = "0.18.1"
 rayon = "1.12.0"
 rfd = { version = "0.18", default-features = false, features = ["xdg-portal"], optional = true }

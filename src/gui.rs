@@ -885,7 +885,7 @@ impl eframe::App for App {
                         egui::ComboBox::from_label("Run on")
                             .selected_text(self.s.device.clone())
                             .show_ui(ui, |ui| {
-                                for d in ["auto", "cuda", "directml", "coreml", "cpu"] {
+                                for d in ["auto", "tensorrt", "cuda", "directml", "coreml", "cpu"] {
                                     ui.selectable_value(&mut self.s.device, d.into(), d);
                                 }
                             });

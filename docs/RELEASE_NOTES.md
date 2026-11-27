@@ -16,15 +16,17 @@ Nothing is uploaded.
 
 ### Before you start
 
-- Install **FFmpeg** and **ONNX Runtime** yourself; neither is in the download.
+- Install **FFmpeg** and **ONNX Runtime** (1.22 or newer) yourself; neither is in
+  the download.
 - Fetch the AI models with `chitra-enhance models get all`.
 - See `USER_GUIDE.md`.
 
 ### What has been tested
 
 - On Linux by hand, on the processor only.
-- On Windows 11 from the command line with an NVIDIA RTX 4070 Ti (DirectML):
-  standard definition, both AI models, about 17 frames per second.
+- On Windows 11 from the command line with an NVIDIA RTX 4070 Ti, standard
+  definition, both AI models: about 23 frames per second with DirectML, about 28
+  with NVIDIA's TensorRT RTX plugin (an optional extra; see the guide).
 - **Not tried on real hardware:** the Windows window, macOS, CUDA, and AMD or Intel
   graphics.
 - Without a graphics card the AI upscaler is very slow: about 3 hours for a

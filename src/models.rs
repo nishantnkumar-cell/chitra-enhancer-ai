@@ -285,6 +285,27 @@ pub fn find_runtime() -> Option<PathBuf> {
     None
 }
 
+/// NVIDIA's TensorRT RTX plugin: `CHITRA_TENSORRT_PLUGIN` names it, or it sits
+/// beside the ONNX Runtime library.
+pub fn find_tensorrt_plugin() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("CHITRA_TENSORRT_PLUGIN") {
+        return Some(PathBuf::from(p)).filter(|p| p.is_file());
+    }
+    beside(&find_runtime()?)
+}
+
+fn beside(runtime: &Path) -> Option<PathBuf> {
+    let name = if cfg!(windows) {
+        "onnxruntime_providers_nv_tensorrt_rtx.dll"
+    } else {
+        "libonnxruntime_providers_nv_tensorrt_rtx.so"
+    };
+    // macOS has no such plugin.
+    (!cfg!(target_os = "macos"))
+        .then(|| runtime.with_file_name(name))
+        .filter(|p| p.is_file())
+}
+
 pub const RUNTIME_HELP: &str = "ONNX Runtime was not found. Install it, or point ORT_DYLIB_PATH at it:\n  \
     Arch/CachyOS: sudo pacman -S onnxruntime-cpu (or onnxruntime-cuda for NVIDIA)\n  \
     Debian/Ubuntu or any Linux: pip install onnxruntime (or onnxruntime-gpu), then set ORT_DYLIB_PATH to\n    \
@@ -296,6 +317,20 @@ pub const RUNTIME_HELP: &str = "ONNX Runtime was not found. Install it, or point
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_tensorrt_plugin_is_looked_for_beside_the_runtime() {
+        let d = tempfile::tempdir().unwrap();
+        let runtime = d.path().join("onnxruntime.dll");
+        assert_eq!(beside(&runtime), None);
+        let name = if cfg!(windows) {
+            "onnxruntime_providers_nv_tensorrt_rtx.dll"
+        } else {
+            "libonnxruntime_providers_nv_tensorrt_rtx.so"
+        };
+        std::fs::write(d.path().join(name), b"x").unwrap();
+        assert_eq!(beside(&runtime).is_some(), !cfg!(target_os = "macos"));
+    }
 
     #[test]
     fn the_manifest_is_well_formed() {

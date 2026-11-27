@@ -14,6 +14,7 @@ pub mod noise;
 pub mod onnx;
 pub mod options;
 pub mod photo;
+pub mod shrink;
 pub mod temporal;
 pub mod tiler;
 pub mod video;
