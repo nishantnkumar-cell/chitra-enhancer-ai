@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chitra Enhancer AI</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { color-scheme: dark; }
+  body { font: 16px/1.5 system-ui, sans-serif; background: #17191c; color: #e8eaed; margin: 0; }
+  main { max-width: 34rem; margin: 0 auto; padding: 1.5rem 1rem; }
+  h1 { font-size: 1.35rem; }
+  label { display: block; margin: 1rem 0 .3rem; }
+  input, select, button { font: inherit; color: inherit; background: #22262b; border: 1px solid #3a4047; border-radius: .4rem; padding: .55rem .7rem; width: 100%; box-sizing: border-box; }
+  button { background: #3fd0b5; color: #0b0d0f; border: 0; font-weight: 600; margin-top: 1.2rem; cursor: pointer; }
+  button:disabled { opacity: .55; cursor: wait; }
+  #state { margin-top: 1rem; min-height: 1.5rem; }
+  #state.bad { color: #ff7a70; }
+  a { color: #3fd0b5; display: block; margin-top: .5rem; }
+  progress { width: 100%; margin-top: .5rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Chitra Enhancer AI</h1>
+  <p>Pictures come back as JPEG XL, short clips as MP4. Files are sent only to this computer.</p>
+  <form id="form">
+    <label for="key">Key (remembered on this device)</label>
+    <input id="key" type="password" autocomplete="off" required>
+    <label for="files">Pictures, or one short clip</label>
+    <input id="files" type="file" multiple required accept="image/jpeg,image/png,image/webp,image/tiff,video/*,.mpg,.mpeg,.ts,.m2ts,.mkv,.avi">
+    <label for="scale">Enlarge</label>
+    <select id="scale"><option value="2" selected>2 times</option><option value="4">4 times</option><option value="1">Same size</option></select>
+    <label for="model">Model</label>
+    <select id="model"><option value="">The usual one</option></select>
+    <button id="go">Enhance</button>
+  </form>
+  <progress id="bar" hidden></progress>
+  <div id="state" role="status"></div>
+  <div id="results"></div>
+</main>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const say = (text, bad) => { $("state").textContent = text; $("state").className = bad ? "bad" : ""; };
+const isClip = f => f.type.startsWith("video/") || /\.(mp4|m4v|mov|mkv|avi|mpg|mpeg|ts|m2ts|mts|vob)$/i.test(f.name);
+$("key").value = localStorage.getItem("chitra-key") || "";
+
+async function call(path, options = {}) {
+  const key = $("key").value.trim();
+  const r = await fetch(path, { ...options, headers: { Authorization: "Bearer " + key } });
+  if (!r.ok) {
+    let why = r.statusText;
+    try { why = (await r.json()).error || why; } catch {}
+    throw new Error(why);
+  }
+  localStorage.setItem("chitra-key", key);
+  return r;
+}
+
+async function models() {
+  if (!$("key").value) return;
+  try {
+    const h = await (await call("/v1/health")).json();
+    $("model").length = 1;
+    for (const m of h.models) $("model").add(new Option(m, m));
+    say("");
+  } catch (e) { say(e.message, true); }
+}
+$("key").addEventListener("change", models);
+models();
+
+function offer(blob, name) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  const size = blob.size < 1048576 ? Math.ceil(blob.size / 1024) + " KB" : (blob.size / 1048576).toFixed(1) + " MB";
+  a.textContent = "Save " + name + " (" + size + ")";
+  $("results").appendChild(a);
+}
+
+async function one(file, query) {
+  const stem = file.name.replace(/\.[^.]*$/, "") || "result";
+  if (!isClip(file)) {
+    const r = await call("/v1/photo?" + query, { method: "POST", body: file });
+    offer(await r.blob(), stem + "-enhanced.jxl");
+    return;
+  }
+  const { job } = await (await call("/v1/clip?" + query, { method: "POST", body: file })).json();
+  for (;;) {
+    await new Promise(done => setTimeout(done, 2000));
+    const s = await (await call("/v1/jobs/" + job)).json();
+    if (s.state === "failed") throw new Error(s.message);
+    if (s.state === "done") break;
+    if (s.state === "running" && s.total) {
+      $("bar").value = s.done; $("bar").max = s.total;
+      say("Working: " + s.done + " of " + s.total + " frames");
+    } else say(s.state === "queued" ? "Waiting for the job before this one" : "Looking at the clip");
+  }
+  say("Fetching the result");
+  offer(await (await call("/v1/jobs/" + job + "/result")).blob(), stem + "-enhanced.mp4");
+  await call("/v1/jobs/" + job, { method: "DELETE" });
+}
+
+$("form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const files = [...$("files").files];
+  const query = new URLSearchParams({ scale: $("scale").value });
+  if ($("model").value) query.set("model", $("model").value);
+  $("go").disabled = true; $("results").textContent = ""; $("bar").hidden = false;
+  let failed = 0;
+  // A wrong key is said before anything large is sent.
+  try { await call("/v1/health"); }
+  catch (e) { say(e.message, true); $("go").disabled = false; $("bar").hidden = true; return; }
+  for (const [i, file] of files.entries()) {
+    $("bar").removeAttribute("value");
+    say("Sending " + file.name + (files.length > 1 ? " (" + (i + 1) + " of " + files.length + ")" : ""));
+    try { await one(file, query); }
+    catch (e) { failed++; say(file.name + ": " + e.message, true); }
+  }
+  $("go").disabled = false; $("bar").hidden = true;
+  if (!failed) say("Done");
+});
+</script>
+</body>
+</html>

@@ -175,7 +175,44 @@ Give the program a photo instead of a video. It writes a 16-bit `.jxl` or `.png`
 and keeps the colour profile and camera information. Heavily compressed JPEGs can
 use a second model for cleaning (`--model-compressed`).
 
-## 9. When something goes wrong
+## 9. Using one computer from your others
+
+Put the Enhancer on the computer with the graphics card and send it pictures and
+short clips from any device on your [Tailscale](https://tailscale.com) network.
+
+**On Windows**, install it as a service, once, from an administrator PowerShell in
+the folder with the program, the ONNX Runtime files and `ffmpeg.exe`:
+
+```
+.\install-windows-service.ps1 -Models "$env:LOCALAPPDATA\chitra-enhance\models"
+```
+
+It then starts with Windows, whoever is signed in. The script prints the address.
+The key is the `"key"` line in `C:\ProgramData\ChitraEnhancer\config.json`
+(open it as administrator). Run the script again to update; use
+`uninstall-windows-service.ps1` to remove it.
+
+**On a phone or any computer**, open the address in a browser, enter the key once,
+choose pictures or a clip, and save the result.
+
+**From the command line:**
+
+```
+chitra-enhance remote --server ADDRESS:8765 --key-file key.txt --save
+chitra-enhance remote photo.jpg another.jpg clip.mp4
+```
+
+| | |
+|---|---|
+| Pictures | JPEG, PNG, WebP or TIFF in, JPEG XL out. Camera details and rotation are kept. Up to 50 MB, and about 30 megapixels when enlarged 2x |
+| Clips | Up to 60 seconds and 500 MB; MP4 out, with the settings the analysis suggests |
+| One at a time | Other jobs wait; uncollected clip results are removed after an hour |
+| Safety | Keep the key private. Only your Tailscale devices can reach the service |
+
+Many browsers cannot show JPEG XL: save the file and open it in a photo viewer
+that does (such as Chitra).
+
+## 10. When something goes wrong
 
 | Message | What to do |
 |---|---|
@@ -190,7 +227,7 @@ use a second model for cleaning (`--model-compressed`).
 To report a problem, see `SECURITY.md` for security issues, otherwise open an issue
 on GitHub. Please do not attach private footage.
 
-## 10. Licence
+## 11. Licence
 
 Free software (AGPL-3.0-or-later) with no warranty. **About** in the window, or
 `chitra-enhance licences`, shows the notice. Your pictures and videos remain

@@ -38,8 +38,9 @@ jobs:
         run: choco install ffmpeg -y --no-progress
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo clippy --all-targets --features onnx -- -D warnings
+      - run: cargo clippy --all-targets --features onnx,server -- -D warnings
       - run: cargo test
+      - run: cargo test --features server
 
   gui:
     name: gui build (${{ matrix.os }})
@@ -57,8 +58,26 @@ jobs:
           toolchain: stable
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo clippy --features gui --all-targets -- -D warnings
-      - run: cargo build --features gui
+      - run: cargo clippy --features gui,server --all-targets -- -D warnings
+      - run: cargo build --features gui,server
+
+  # The installer is only checked for mistakes, not run.
+  installer:
+    name: windows installer script
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - shell: powershell
+        run: |
+          $bad = $false
+          foreach ($f in Get-ChildItem scripts\*.ps1) {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors) { "$($f.Name):"; $errors | ForEach-Object { "  $_" }; $bad = $true }
+          }
+          if ($bad) { exit 1 }
 
   deny:
     name: cargo deny (advisories, licences, bans, sources)
