@@ -41,7 +41,7 @@ impl Plane {
 
 /// Index into `0..n` for a position that may be past the end, mirroring at the
 /// edge without repeating the edge sample (`... 2 1 0 1 2 ... n-2 n-1 n-2 ...`).
-fn reflect(i: usize, n: usize) -> usize {
+pub(crate) fn reflect(i: usize, n: usize) -> usize {
     if n == 1 {
         return 0;
     }
@@ -51,7 +51,7 @@ fn reflect(i: usize, n: usize) -> usize {
 }
 
 /// The smallest multiple of `m` that is at least `n`.
-fn round_up(n: usize, m: usize) -> usize {
+pub(crate) fn round_up(n: usize, m: usize) -> usize {
     n.div_ceil(m) * m
 }
 
