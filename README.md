@@ -132,13 +132,40 @@ that also opens videos, DVD images and photos. To uninstall, delete
 
 ## The window (GUI)
 
-`cargo build --release --features gui,onnx` makes two programs, `chitra-enhance`
+`cargo build --release --features gui,onnx,server` makes two programs, `chitra-enhance`
 (command line) and `chitra-enhance-gui` (a window; keep them in the same folder).
 Pick a video or photo, tick *Five-frame AI denoising* for camcorder noise, press
 Start. Stop keeps every finished chunk, and Continue picks up where it left off.
 The window finds models in `~/.local/share/chitra-enhance/models`
 (`%LOCALAPPDATA%\chitra-enhance\models` on Windows) and shows the exact command
 line it runs, so anything done in the window can be repeated in a script.
+
+## Enhancing for your other computers
+
+`chitra-enhance serve` lets other devices on your [Tailscale](https://tailscale.com)
+network send pictures (JPEG, PNG, WebP, TIFF; back comes JPEG XL) and short clips
+(up to 60 seconds; back comes MP4) to the computer with the graphics card. Open
+its address in a browser, also on a phone, or use the command line:
+
+```
+chitra-enhance remote --server 100.101.102.103:8765 --key-file key.txt --save
+chitra-enhance remote holiday.jpg clip.mp4
+```
+
+On Windows, `scripts/install-windows-service.ps1` (in the Windows download too)
+installs it as a service that runs whether or not anyone is signed in:
+
+```
+.\install-windows-service.ps1 -Models "$env:LOCALAPPDATA\chitra-enhance\models"
+```
+
+Elsewhere: `chitra-enhance new-key > key.txt`, then
+`chitra-enhance serve --listen <this computer's Tailscale address>:8765 --key-file key.txt`.
+
+It listens only on the computer itself and on Tailscale addresses, needs the key
+for every request, takes picture and video files only (never file names from the
+sender), does one job at a time, and removes what was sent once it is dealt with.
+Traffic is encrypted by Tailscale; the service itself speaks plain HTTP.
 
 ## Photos
 

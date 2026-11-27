@@ -43,7 +43,7 @@ fn parse_shift(s: &str) -> Result<Shift, String> {
 #[command(
     version,
     about,
-    after_help = "Also: `chitra-enhance models` manages the AI models; `chitra-enhance licences` shows\nthe licence. Free software (AGPL-3.0-or-later) with no warranty."
+    after_help = "Also: `chitra-enhance models` manages the AI models; `chitra-enhance serve` and `remote`\nenhance for other computers on your Tailscale network; `chitra-enhance licences` shows\nthe licence. Free software (AGPL-3.0-or-later) with no warranty."
 )]
 struct Args {
     /// The video or photo to restore, a folder of them, or a DVD (an .iso image,
@@ -176,6 +176,9 @@ struct Args {
     #[arg(long, hide = true)]
     stop_after_chunks: Option<usize>,
 }
+
+#[cfg(feature = "server")]
+mod service;
 
 fn main() {
     if let Err(e) = real_main() {
@@ -316,6 +319,12 @@ fn real_main() -> Result<()> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.first().map(String::as_str) == Some("models") {
         return models_command(&argv[1..]);
+    }
+    if let Some(command @ ("serve" | "remote" | "new-key")) = argv.first().map(String::as_str) {
+        #[cfg(feature = "server")]
+        return service::command(command, &argv);
+        #[cfg(not(feature = "server"))]
+        bail!("`{command}` needs a build with `--features server`");
     }
     if matches!(
         argv.first().map(String::as_str),

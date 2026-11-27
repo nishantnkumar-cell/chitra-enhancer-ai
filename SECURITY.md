@@ -27,9 +27,19 @@ files you ask for. It treats these as **untrusted** and bounds them:
   Windows), so pasting a suggested command cannot run anything hidden in a name.
 - **ffmpeg / ffprobe.** Started as separate programs with argument lists (never a
   shell); paths are made absolute so a name starting with `-` is not an option.
+- **The network service (`serve`).** Off unless started. It refuses to listen
+  anywhere but this computer and Tailscale addresses and answers only such
+  addresses; every request needs a key (at least 24 characters, compared in
+  constant time). Uploads are limited in size and number, recognised by their
+  first bytes (play lists and scripts that could make ffmpeg read other files
+  are refused), stored under names the service chooses, and removed once dealt
+  with. Error answers do not name folders. Anyone with the key can use the
+  computer's processor and graphics card and, as with any file you open,
+  exercises the picture and video decoders: share it only with your own devices.
+  The Windows installer runs it as an unprivileged service account.
 - **No usage reporting.** ONNX Runtime's reporting, which Microsoft's Windows
   builds switch on by default, is turned off. The program connects to the network
-  only to download models when asked.
+  only to download models and to talk to a service you name, when asked.
 - **Downloaded model files.** Fetched over HTTPS only, size-limited, and checked
   against a SHA-256 built into the program; a mismatch is deleted.
 - **Your own models and ONNX Runtime.** A model is a program for the inference

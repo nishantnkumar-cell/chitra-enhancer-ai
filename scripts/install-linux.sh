@@ -9,7 +9,7 @@ APPS="$PREFIX/share/applications"
 ENTRY="$APPS/chitra-enhancer-ai.desktop"
 cd "$(dirname "$0")/.."
 
-[ -n "${SKIP_BUILD:-}" ] || cargo build --release --features gui,onnx
+[ -n "${SKIP_BUILD:-}" ] || cargo build --release --features gui,onnx,server
 mkdir -p "$BIN" "$APPS"
 install -m 755 target/release/chitra-enhance target/release/chitra-enhance-gui "$BIN/"
 cat > "$ENTRY" <<DESKTOP

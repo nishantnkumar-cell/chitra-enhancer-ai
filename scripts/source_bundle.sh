@@ -1,7 +1,7 @@
 #!/bin/sh
 # The complete source of a build, libraries included, as the licence requires
 # to be offered beside the programs. Builds without a network:
-#     tar xf NAME.tar.xz && cd NAME && cargo build --release --features gui,onnx --offline
+#     tar xf NAME.tar.xz && cd NAME && cargo build --release --features gui,onnx,server --offline
 # usage: scripts/source_bundle.sh NAME OUTDIR
 set -eu
 [ $# = 2 ] || { echo "usage: $0 NAME OUTDIR" >&2; exit 2; }

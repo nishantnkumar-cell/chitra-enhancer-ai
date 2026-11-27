@@ -16,7 +16,7 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-FEATURES = "gui,onnx"
+FEATURES = "gui,onnx,server"
 # Font name -> the notice file epaint_default_fonts ships for it.
 FONTS = {
     "Hack": "Hack-Regular.txt",

@@ -13,6 +13,8 @@ Nothing is uploaded.
 - Suggested settings from samples of your footage; previews with a time estimate.
 - Stop and carry on later; whole folders; photos to 16-bit JPEG XL or PNG.
 - A window and a command line.
+- Send pictures and short clips from your other devices over Tailscale; on
+  Windows it can run as a service.
 
 ### Before you start
 
