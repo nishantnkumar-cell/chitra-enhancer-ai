@@ -163,7 +163,10 @@ Transparency is not kept.
 * FFmpeg and ffprobe on the PATH (or `--ffmpeg PATH`).
 * For AI models: build with `cargo build --release --features onnx` and point
   `ORT_DYLIB_PATH` at the ONNX Runtime library (`libonnxruntime.so`,
-  `onnxruntime.dll`, `libonnxruntime.dylib`). `--device auto|cuda|directml|coreml|cpu`.
+  `onnxruntime.dll`, `libonnxruntime.dylib`), version 1.22 or newer.
+  `--device auto|tensorrt|cuda|directml|coreml|cpu`. With NVIDIA's TensorRT RTX
+  plugin beside the library, RTX cards use it (see the user guide).
+  A 4x model asked for a 2x result is shrunk inside the model, on the card.
 * Models are FP16 or FP32 ONNX, input RGB 0..1 (NCHW). Tile size follows
   `--vram-budget` (GB), from 1024 pixels, and steps down 1024 -> 768 -> 512 ->
   256 -> 128 if the GPU runs out of memory. A tile that holds the whole frame is
@@ -209,8 +212,9 @@ Video pipeline, resume, tiler, ONNX engine, grain, 1-4x scaling and photo mode
 (JPEG quality tiers, 16-bit JXL/PNG) work, tested with a real Real-ESRGAN model.
 Five-frame video denoising (FastDVDnet) and CI on Linux, Windows and macOS are in.
 The window has been checked from screenshots, not yet by someone using it.
-Graphics card acceleration is tested with DirectML on an NVIDIA RTX 4070 Ti (see
-the user guide for speeds); CUDA and Core ML have not been tried on real hardware.
+Graphics card acceleration is tested with DirectML and TensorRT RTX on an NVIDIA
+RTX 4070 Ti (see the user guide for speeds); CUDA and Core ML have not been tried
+on real hardware.
 
 ## Security
 

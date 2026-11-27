@@ -846,3 +846,60 @@ fn three_options_are_tried_on_a_sample_and_nothing_else_is_touched() {
     assert!(String::from_utf8_lossy(&again.stderr).contains("--force"));
     assert!(run(&["--force"]).status.success());
 }
+
+/// Needs ORT_DYLIB_PATH and CHITRA_TEST_MODEL (a 4x upscaler).
+#[cfg(feature = "onnx")]
+#[test]
+fn shrinking_inside_the_model_matches_shrinking_afterwards() {
+    use chitra_enhance::engine::{Engine, Rescaled};
+    use chitra_enhance::onnx::{Device, OnnxEngine};
+    let (Some(_), Some(model)) = (
+        std::env::var_os("ORT_DYLIB_PATH"),
+        std::env::var_os("CHITRA_TEST_MODEL"),
+    ) else {
+        eprintln!("CHITRA_TEST_MODEL not set: skipped");
+        return;
+    };
+    let load = |tile| OnnxEngine::load(Path::new(&model), Device::Cpu, 2048, tile).unwrap();
+    if load(None).scale() != 4 {
+        return;
+    }
+    assert!(!load(None).shrink_anywhere(3), "only halving is done");
+    // One tile, and several with a size that needs padding.
+    for (w, h, tile) in [(70usize, 45usize, None), (150, 90, Some(64))] {
+        let mut inside = load(tile);
+        assert!(inside.shrink_anywhere(2), "the model can be changed");
+        assert_eq!(inside.scale(), 2);
+        assert!(inside.describe().contains("4x shrunk to 2x"));
+        let mut after = Rescaled::wrap(Box::new(load(tile)), 2);
+        // Slopes and hard edges.
+        let picture: Vec<u8> = (0..w * h * 3)
+            .map(|i| {
+                let (x, y, c) = (i / 3 % w, i / 3 / w, i % 3);
+                if (x / 9 + y / 7) % 2 == 0 {
+                    ((x * 3 + y * 2 + c * 40) % 256) as u8
+                } else {
+                    230
+                }
+            })
+            .collect();
+        let a = inside.process(&picture, w, h).unwrap();
+        let b = after.process(&picture, w, h).unwrap();
+        assert_eq!((a.len(), b.len()), (w * h * 12, w * h * 12));
+        // Away from the border, where the two filters treat the edge alike.
+        let (mut sum, mut n) = (0.0f64, 0u64);
+        for y in 6..h * 2 - 6 {
+            for x in 6..w * 2 - 6 {
+                for c in 0..3 {
+                    let i = (y * w * 2 + x) * 3 + c;
+                    let d = f64::from(a[i]) - f64::from(b[i]);
+                    sum += d * d;
+                    n += 1;
+                }
+            }
+        }
+        let psnr = 10.0 * (255.0f64 * 255.0 / (sum / n as f64).max(1e-9)).log10();
+        eprintln!("{w}x{h}: {psnr:.1} dB");
+        assert!(psnr > 45.0, "{w}x{h}: only {psnr:.1} dB alike");
+    }
+}

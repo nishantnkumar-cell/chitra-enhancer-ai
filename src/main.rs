@@ -301,6 +301,9 @@ fn models_command(args: &[String]) -> Result<()> {
                 Some(p) => println!("ONNX Runtime found: {}", p.display()),
                 None => println!("{}", models::RUNTIME_HELP),
             }
+            if let Some(p) = models::find_tensorrt_plugin() {
+                println!("TensorRT plugin found: {}", p.display());
+            }
             Ok(())
         }
         Some(other) => {
@@ -949,7 +952,7 @@ fn run_one(mut a: Args) -> Result<Option<video::Preview>> {
     o.check_picture(&info)?;
     let mut engine: Box<dyn Engine> = match &a.model {
         #[cfg(feature = "onnx")]
-        Some(m) => load_model(m, a.device, a.vram_budget, a.tile_size)?,
+        Some(m) => load_model(m, a.device, a.vram_budget, a.tile_size, a.scale)?,
         #[cfg(not(feature = "onnx"))]
         Some(_) => bail!(
             "this build has no AI model support: rebuild with `cargo build --release --features onnx`"
@@ -1069,13 +1072,13 @@ fn load_model(
     device: chitra_enhance::onnx::Device,
     vram_gb: usize,
     tile: Option<usize>,
+    scale: Option<usize>,
 ) -> Result<Box<dyn Engine>> {
-    Ok(Box::new(chitra_enhance::onnx::OnnxEngine::load(
-        m,
-        device,
-        vram_gb * 1024,
-        tile,
-    )?))
+    let mut e = chitra_enhance::onnx::OnnxEngine::load(m, device, vram_gb * 1024, tile)?;
+    if let Some(target) = scale {
+        e.shrink_to(target);
+    }
+    Ok(Box::new(e))
 }
 
 fn photo_mode(a: &Args) -> Result<()> {
@@ -1103,7 +1106,8 @@ fn photo_mode(a: &Args) -> Result<()> {
     }
     let mut engine: Box<dyn Engine> = match &model {
         #[cfg(feature = "onnx")]
-        Some(m) => load_model(m, a.device, a.vram_budget, a.tile_size)?,
+        // Photos are resized afterwards, at full precision.
+        Some(m) => load_model(m, a.device, a.vram_budget, a.tile_size, None)?,
         #[cfg(not(feature = "onnx"))]
         Some(_) => bail!(
             "this build has no AI model support: rebuild with `cargo build --release --features onnx`"

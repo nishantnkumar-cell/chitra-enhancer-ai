@@ -2,13 +2,15 @@
 //! CPU through ONNX Runtime. The library is loaded at run time: set
 //! `ORT_DYLIB_PATH` to `libonnxruntime.so` / `onnxruntime.dll` / `.dylib`.
 //!
+//! With NVIDIA's TensorRT RTX plugin beside the runtime, RTX cards use it.
+//!
 //! A model is loaded once and kept for the whole run. The tile size starts from
 //! the memory budget; when the GPU runs out of memory the session is rebuilt
 //! (a failed CUDA allocation can leave it unusable) and the tile size steps
 //! down 1024 -> 768 -> 512 -> 256 -> 128.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::ValueEnum;
@@ -17,6 +19,7 @@ use half::slice::HalfFloatSliceExt;
 use ort::environment::Environment;
 use ort::ep::{self, ExecutionProviderDispatch};
 use ort::session::Session;
+use ort::session::builder::SessionBuilder;
 use ort::value::{Tensor, TensorElementType, ValueType};
 use rayon::prelude::*;
 
@@ -25,13 +28,18 @@ use crate::infer::{
     BLOCK, byte, chw_from_rgb8, denoiser_tile_for_budget, from_chw, overlap_for, plane_from_rgb8,
     rgb8_from_chw, rgb8_from_plane, smaller_tile, tile_for_budget, to_chw,
 };
+use crate::shrink;
 use crate::temporal::{FRAMES, Temporal, stack};
 use crate::tiler::{Plane, map_tiled, round_up, upscale_tiled};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Device {
-    /// The best this computer offers: CUDA, DirectML or Core ML, else CPU.
+    /// The best this computer offers: TensorRT if its plugin is there, then
+    /// CUDA, DirectML or Core ML, else CPU.
     Auto,
+    /// NVIDIA's TensorRT RTX plugin (RTX 30 series or newer), kept beside
+    /// ONNX Runtime.
+    Tensorrt,
     Cuda,
     Directml,
     Coreml,
@@ -45,6 +53,8 @@ impl Device {
         let coreml = ("Core ML", ep::CoreML::default().build());
         let cpu = ("CPU", ep::CPU::default().build());
         match self {
+            // The plugin is not one of these; it is tried before them.
+            Device::Tensorrt => vec![],
             Device::Cuda => vec![cuda, cpu],
             Device::Directml => vec![dml, cpu],
             Device::Coreml => vec![coreml, cpu],
@@ -65,64 +75,84 @@ impl Device {
 /// A model that is loaded and ready, with what is needed to load it again.
 struct Loaded {
     env: Arc<Environment>,
-    path: PathBuf,
+    source: Source,
     device: Device,
     session: Session,
     /// The processor it runs on.
     provider: String,
     /// The picture size it was last prepared for.
     sized: Option<(usize, usize)>,
+    /// The names of the model's free height and width.
+    sides: [String; 2],
+}
+
+/// Where a model is read from.
+#[derive(Clone)]
+enum Source {
+    File(PathBuf),
+    /// A model changed in memory (see `shrink`).
+    Memory(Arc<[u8]>),
 }
 
 impl Loaded {
-    fn new(path: &Path, device: Device) -> Result<Loaded> {
+    /// `first` is the picture size used until `prepare` says otherwise, for a
+    /// processor that must know one from the start.
+    fn new(path: &Path, device: Device, first: usize) -> Result<Loaded> {
         let env = environment()?;
-        let (session, provider) = build_session(&env, path, device, &[])?;
+        let source = Source::File(path.to_path_buf());
+        let (session, provider) = build_session(&env, &source, device, first, &[])?;
+        // The usual names; the model may say others (when it has not been
+        // given sizes already).
+        let mut sides = ["h".to_string(), "w".to_string()];
+        if let Some(ValueType::Tensor {
+            dimension_symbols, ..
+        }) = session.inputs().first().map(|i| i.dtype())
+        {
+            for (side, index) in sides.iter_mut().zip([2, 3]) {
+                if let Some(name) = dimension_symbols.get(index).filter(|n| !n.is_empty()) {
+                    side.clone_from(name);
+                }
+            }
+        }
         Ok(Loaded {
             env,
-            path: path.to_path_buf(),
+            source,
             device,
             session,
             provider,
             sized: None,
+            sides,
         })
     }
 
     /// A fresh session, as after the card ran out of memory.
     fn reload(&mut self) -> Result<()> {
-        (self.session, self.provider) = build_session(&self.env, &self.path, self.device, &[])?;
+        let first = 64;
+        (self.session, self.provider) =
+            build_session(&self.env, &self.source, self.device, first, &[])?;
         self.sized = None;
         Ok(())
     }
 
     /// DirectML runs much faster (about 1.5x with half precision) when told the
-    /// picture size in advance, so the model is loaded again for each new size.
-    /// A video has one size; its pictures come out the same either way.
-    fn prepare(&mut self, w: usize, h: usize) {
-        if self.provider != "DirectML" || self.sized == Some((w, h)) {
-            return;
+    /// picture size in advance, and TensorRT has to be, so the model is loaded
+    /// again for each new size. A video has one size.
+    fn prepare(&mut self, w: usize, h: usize) -> Result<()> {
+        let must = self.provider == TENSORRT;
+        if !(must || self.provider == "DirectML") || self.sized == Some((w, h)) {
+            return Ok(());
+        }
+        let sizes = [(self.sides[0].clone(), h), (self.sides[1].clone(), w)];
+        // The same processor again, not whatever Auto would pick this time.
+        let device = if must { Device::Tensorrt } else { self.device };
+        match build_session(&self.env, &self.source, device, w.max(h), &sizes) {
+            Ok((session, provider)) => (self.session, self.provider) = (session, provider),
+            // DirectML can carry on unprepared; TensorRT cannot.
+            Err(e) if must => return Err(e),
+            Err(_) => {}
         }
         self.sized = Some((w, h));
-        // The names of the first input's height and width, if they are free.
-        let sizes: Vec<(String, usize)> = match self.session.inputs().first().map(|i| i.dtype()) {
-            Some(ValueType::Tensor {
-                dimension_symbols, ..
-            }) => [(2, h), (3, w)]
-                .into_iter()
-                .filter_map(|(i, size)| {
-                    let name = dimension_symbols.get(i)?;
-                    (!name.is_empty()).then(|| (name.clone(), size))
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
-        if sizes.is_empty() {
-            return;
-        }
-        // If it cannot be prepared this way, the model stays as it was.
-        if let Ok((session, provider)) = build_session(&self.env, &self.path, self.device, &sizes) {
-            (self.session, self.provider) = (session, provider);
-        }
+        Ok(())
     }
 }
 
@@ -139,54 +169,132 @@ static HALF_OUT: LazyLock<Vec<u8>> = LazyLock::new(|| {
 
 pub struct OnnxEngine {
     model: Loaded,
+    /// The model file's name, for the log.
+    file: String,
     half: bool,
     scale: usize,
     tile: usize,
     in_name: String,
     out_name: String,
-    label: String,
+    /// The model's own scale, when its result is shrunk inside it.
+    shrunk_from: Option<usize>,
+}
+
+/// What ONNX Runtime calls the TensorRT RTX plugin.
+const PLUGIN: &str = "NvTensorRTRTXExecutionProvider";
+const TENSORRT: &str = "TensorRT";
+
+/// Makes the plugin known to ONNX Runtime, once.
+fn register_plugin(env: &Environment) -> Result<()> {
+    static DONE: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+    DONE.get_or_init(|| {
+        let file = crate::models::find_tensorrt_plugin()
+            .ok_or("its library is not beside ONNX Runtime (see the user guide)")?;
+        env.register_ep_library(PLUGIN, file)
+            .map_err(|e| e.to_string())
+    })
+    .clone()
+    .map_err(|e| anyhow!("the TensorRT plugin cannot be used: {e}"))
+}
+
+fn session_options(env: &Environment) -> ort::Result<SessionBuilder> {
+    // Idle model threads sleep instead of spinning: the stages of the video
+    // pipeline run at the same time and share the processor.
+    Session::builder(env)?
+        .with_config_entry("session.intra_op.allow_spinning", "0")
+        .map_err(|e| e.into())
+}
+
+fn finish(
+    mut b: SessionBuilder,
+    source: &Source,
+    sizes: &[(String, usize)],
+) -> ort::Result<Session> {
+    for (dim, size) in sizes {
+        b = b
+            .with_dimension_override(dim, *size as i64)
+            .map_err(|e| -> ort::Error { e.into() })?;
+    }
+    match source {
+        Source::File(path) => b.commit_from_file(path),
+        Source::Memory(bytes) => b.commit_from_memory(bytes),
+    }
+}
+
+/// The model on the TensorRT plugin, entirely on the card: letting parts fall
+/// to the processor made it far slower in testing.
+fn build_on_plugin(
+    env: &Environment,
+    source: &Source,
+    first: usize,
+    sizes: &[(String, usize)],
+) -> Result<Session> {
+    register_plugin(env)?;
+    let cards: Vec<_> = env
+        .devices()
+        .filter(|d| d.ep().is_ok_and(|name| name == PLUGIN))
+        .collect();
+    if cards.is_empty() {
+        bail!("the TensorRT plugin found no graphics card it can use");
+    }
+    let b = session_options(env)?
+        .with_devices(cards, None)
+        .map_err(|e| -> ort::Error { e.into() })?
+        .with_config_entry("session.disable_cpu_ep_fallback", "1")
+        .map_err(|e| -> ort::Error { e.into() })?;
+    // It cannot build for sizes that are left open.
+    let open = [("h".to_string(), first), ("w".to_string(), first)];
+    let sizes = if sizes.is_empty() { &open[..] } else { sizes };
+    Ok(finish(b, source, sizes)?)
 }
 
 /// Loads a model on the first processor of `device` that takes it, and says
 /// which one. `sizes` fixes the model's free dimensions (by name) in advance.
 fn build_session(
     env: &Environment,
-    path: &Path,
+    source: &Source,
     device: Device,
+    first: usize,
     sizes: &[(String, usize)],
 ) -> Result<(Session, String)> {
     let mut last = None;
+    let plugin = match device {
+        Device::Tensorrt => true,
+        Device::Auto => crate::models::find_tensorrt_plugin().is_some(),
+        _ => false,
+    };
+    if plugin {
+        match build_on_plugin(env, source, first, sizes) {
+            Ok(s) => return Ok((s, TENSORRT.to_string())),
+            // Asked for by name: say why rather than use something else.
+            Err(e) if device == Device::Tensorrt => return Err(e),
+            Err(e) => eprintln!("TensorRT is not used: {e:#}"),
+        }
+    }
     for (name, p) in device.providers() {
         let built = (|| -> ort::Result<Session> {
-            let mut b = Session::builder(env)?
+            let mut b = session_options(env)?
                 .with_execution_providers([p.error_on_failure()])
                 .map_err(|e| -> ort::Error { e.into() })?;
-            // Idle model threads sleep instead of spinning: the stages of the
-            // video pipeline run at the same time and share the processor.
-            b = b
-                .with_config_entry("session.intra_op.allow_spinning", "0")
-                .map_err(|e| -> ort::Error { e.into() })?;
-            for (dim, size) in sizes {
-                b = b
-                    .with_dimension_override(dim, *size as i64)
-                    .map_err(|e| -> ort::Error { e.into() })?;
-            }
             if name == "DirectML" {
                 // DirectML does not support ONNX Runtime's memory planning.
                 b = b
                     .with_memory_pattern(false)
                     .map_err(|e| -> ort::Error { e.into() })?;
             }
-            b.commit_from_file(path)
+            finish(b, source, sizes)
         })();
         match built {
             Ok(s) => return Ok((s, name.to_string())),
             Err(e) => last = Some(format!("{name}: {e}")),
         }
     }
+    let file = match source {
+        Source::File(path) => path.display().to_string(),
+        Source::Memory(_) => "the changed model".to_string(),
+    };
     Err(anyhow!(
-        "no execution provider could load {}: {}",
-        path.display(),
+        "no execution provider could load {file}: {}",
         last.unwrap_or_default()
     ))
 }
@@ -230,7 +338,7 @@ impl OnnxEngine {
         vram_mb: usize,
         tile: Option<usize>,
     ) -> Result<OnnxEngine> {
-        let loaded = Loaded::new(model, device)?;
+        let loaded = Loaded::new(model, device, 16)?;
         let session = &loaded.session;
         let input = session.inputs().first().context("the model has no input")?;
         let half = match input.dtype() {
@@ -251,9 +359,13 @@ impl OnnxEngine {
             .context("the model has no output")?
             .name()
             .to_string();
-        let provider = loaded.provider.clone();
         let mut e = OnnxEngine {
             model: loaded,
+            file: model
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
             half,
             scale: 1,
             tile: tile.map_or_else(
@@ -262,32 +374,88 @@ impl OnnxEngine {
             ),
             in_name,
             out_name,
-            label: String::new(),
+            shrunk_from: None,
         };
-        let probe = e.run_tile(&Plane::new(16, 16, 3))?;
-        if probe.w % 16 != 0 || probe.w == 0 {
+        e.scale = e.probe()?;
+        Ok(e)
+    }
+
+    /// The model's scale, found by running one small tile.
+    fn probe(&mut self) -> Result<usize> {
+        let out = self.run_tile(&Plane::new(16, 16, 3))?;
+        if out.w % 16 != 0 || out.w == 0 {
             bail!(
                 "the model's output ({}x{}) is not a whole multiple of its input",
-                probe.w,
-                probe.h
+                out.w,
+                out.h
             );
         }
-        e.scale = probe.w / 16;
-        e.label = format!(
-            "{} on {} ({}, {}x, tiles up to {})",
-            model.file_name().unwrap_or_default().to_string_lossy(),
-            provider,
-            if half { "FP16" } else { "FP32" },
-            e.scale,
-            e.tile
-        );
-        Ok(e)
+        Ok(out.w / 16)
+    }
+
+    /// For a result `target` times the input from a model that makes twice
+    /// that: shrinks inside the model, so the card does it and a quarter of
+    /// the data comes back (about a quarter faster in testing). Does nothing
+    /// on the processor, or if the model cannot be changed this way.
+    pub fn shrink_to(&mut self, target: usize) {
+        if self.model.provider != "CPU" {
+            self.shrink_anywhere(target);
+        }
+    }
+
+    /// `shrink_to` on any processor; returns whether the model now shrinks.
+    pub fn shrink_anywhere(&mut self, target: usize) -> bool {
+        if self.shrunk_from.is_some() || self.scale != target * 2 {
+            return false;
+        }
+        let Source::File(path) = &self.model.source else {
+            return false;
+        };
+        let Some(changed) = std::fs::read(path)
+            .ok()
+            .and_then(|bytes| shrink::halve_output(&bytes))
+        else {
+            return false;
+        };
+        let before = (self.model.source.clone(), self.out_name.clone());
+        self.model.source = Source::Memory(changed.into());
+        let works = self.use_current_source().is_ok_and(|scale| scale == target);
+        if works {
+            self.shrunk_from = Some(self.scale);
+            self.scale = target;
+        } else {
+            (self.model.source, self.out_name) = before;
+            // It worked a moment ago; a failure shows at the first frame.
+            let _ = self.use_current_source();
+        }
+        works
+    }
+
+    fn use_current_source(&mut self) -> Result<usize> {
+        // Sized for the probe below.
+        (self.model.session, self.model.provider) = build_session(
+            &self.model.env,
+            &self.model.source,
+            self.model.device,
+            16,
+            &[],
+        )?;
+        self.model.sized = None;
+        self.out_name = self
+            .model
+            .session
+            .outputs()
+            .first()
+            .context("the model has no output")?
+            .name()
+            .to_string();
+        self.probe()
     }
 
     fn run_tile(&mut self, t: &Plane) -> Result<Plane> {
         // (16 x 16 is the probe made while loading.)
         if t.w > 16 {
-            self.model.prepare(t.w, t.h);
+            self.model.prepare(t.w, t.h)?;
         }
         let shape = [1i64, t.c as i64, t.h as i64, t.w as i64];
         let chw = to_chw(t);
@@ -316,7 +484,7 @@ impl OnnxEngine {
     /// pictures as the tiled route, without its larger copies in between.
     fn run_whole(&mut self, rgb: &[u8], w: usize, h: usize) -> Result<Vec<u8>> {
         let (pw, ph) = (round_up(w, 16), round_up(h, 16));
-        self.model.prepare(pw, ph);
+        self.model.prepare(pw, ph)?;
         let s = self.scale;
         let (big, kept) = ((pw * s, ph * s), (w * s, h * s));
         let shape = [1i64, 3, ph as i64, pw as i64];
@@ -399,7 +567,17 @@ impl Engine for OnnxEngine {
     }
 
     fn describe(&self) -> String {
-        self.label.clone()
+        let scale = match self.shrunk_from {
+            Some(own) => format!("{own}x shrunk to {}x on the card", self.scale),
+            None => format!("{}x", self.scale),
+        };
+        format!(
+            "{} on {} ({}, {scale}, tiles up to {})",
+            self.file,
+            self.model.provider,
+            if self.half { "FP16" } else { "FP32" },
+            self.tile
+        )
     }
 
     fn process_plane(&mut self, src: &Plane) -> Result<Plane> {
@@ -452,7 +630,7 @@ impl OnnxDenoiser {
         tile: Option<usize>,
         sigma: f32,
     ) -> Result<OnnxDenoiser> {
-        let loaded = Loaded::new(model, device)?;
+        let loaded = Loaded::new(model, device, 64)?;
         let (session, provider) = (&loaded.session, loaded.provider.clone());
         let names: Vec<&str> = session.inputs().iter().map(|i| i.name()).collect();
         if names != ["frames", "sigma"] {
@@ -487,7 +665,7 @@ impl OnnxDenoiser {
     }
 
     fn run_tile(&mut self, t: &Plane) -> Result<Plane> {
-        self.model.prepare(t.w, t.h);
+        self.model.prepare(t.w, t.h)?;
         let (w, h) = (t.w as i64, t.h as i64);
         let chw = to_chw(t);
         let level = self.sigma / 255.0;
@@ -547,7 +725,8 @@ impl Temporal for OnnxDenoiser {
 pub fn inspect(path: &Path) -> Result<crate::models::ModelKind> {
     use crate::models::ModelKind;
     let env = environment()?;
-    let (session, _) = build_session(&env, path, Device::Cpu, &[])?;
+    let source = Source::File(path.to_path_buf());
+    let (session, _) = build_session(&env, &source, Device::Cpu, 64, &[])?;
     let names: Vec<String> = session
         .inputs()
         .iter()
