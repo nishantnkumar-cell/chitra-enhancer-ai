@@ -31,7 +31,7 @@ pub struct Settings {
     pub preview_secs: u32,
     /// Video quality, lower is better; None = the codec's default.
     pub crf: Option<u32>,
-    /// Largest tile in pixels (128, 256, 512); None = chosen from the GPU memory.
+    /// Largest tile in pixels (64..=1024); None = chosen from the GPU memory.
     pub tile: Option<usize>,
     /// Seconds per resumable chunk; None = 30.
     pub chunk_secs: Option<u32>,
@@ -152,6 +152,15 @@ pub fn preview_output(input: &Path) -> PathBuf {
     input.with_file_name(format!("{stem}-preview.mp4"))
 }
 
+/// Where the samples of the three choices go: a folder `clip-options` next to
+/// the input, or in the home folder for a disc that cannot be written to.
+pub fn options_folder(input: &Path) -> PathBuf {
+    let out = default_output(input);
+    let stem = out.file_stem().unwrap_or_default().to_string_lossy();
+    let name = stem.strip_suffix("-enhanced").unwrap_or(&stem);
+    out.with_file_name(format!("{name}-options"))
+}
+
 impl Settings {
     /// Why the job cannot start yet, if it cannot.
     pub fn problem(&self) -> Option<String> {
@@ -224,6 +233,44 @@ impl Settings {
             "--analyze".into(),
             "--progress".into(),
         ];
+        if crate::disc::source(&self.input).is_some()
+            && let Some(t) = &self.title
+            && t != "all"
+        {
+            a.extend(["--title".into(), t.clone()]);
+        }
+        a
+    }
+
+    /// Arguments that try three ways of restoring a sample (see `parse_options`).
+    pub fn options_args(&self) -> Vec<String> {
+        let s = |p: &Path| p.to_string_lossy().into_owned();
+        let mut a = vec![
+            "-i".into(),
+            s(&self.input),
+            "-o".into(),
+            s(&options_folder(&self.input)),
+            "--options".into(),
+            "--preview".into(),
+            self.preview_secs.clamp(1, 30).to_string(),
+            "--progress".into(),
+            "--force".into(),
+            "--device".into(),
+            self.device.clone(),
+            "--vram-budget".into(),
+            self.vram_gb.to_string(),
+            "--codec".into(),
+            self.codec.clone(),
+        ];
+        if let Some(t) = self.tile {
+            a.extend(["--tile-size".into(), t.to_string()]);
+        }
+        if let Some(m) = &self.model {
+            a.extend(["--model".into(), s(m)]);
+        }
+        if let Some(m) = &self.five_frame_model {
+            a.extend(["--temporal-model".into(), s(m)]);
+        }
         if crate::disc::source(&self.input).is_some()
             && let Some(t) = &self.title
             && t != "all"
@@ -376,6 +423,11 @@ pub fn command_line(args: &[String]) -> String {
         .join(" ")
 }
 
+/// `OPTIONS {...}` -> the three choices and how they did.
+pub fn parse_options(line: &str) -> Option<crate::options::Report> {
+    serde_json::from_str(line.strip_prefix("OPTIONS ")?).ok()
+}
+
 /// `ANALYSIS {...}` -> the report.
 pub fn parse_analysis(line: &str) -> Option<crate::analyze::Report> {
     serde_json::from_str(line.strip_prefix("ANALYSIS ")?).ok()
@@ -474,6 +526,28 @@ mod tests {
         );
         assert!(is_video(Path::new("a.MKV")) && is_video(Path::new("t.dv")));
         assert!(!is_video(Path::new("a.jpg")) && !is_video(Path::new("a.txt")));
+    }
+
+    #[test]
+    fn the_three_choices_are_tried_in_their_own_folder_with_the_users_hardware() {
+        let mut s = video();
+        s.device = "cpu".into();
+        s.tile = Some(256);
+        s.preview_secs = 90;
+        let a = s.options_args().join(" ");
+        let folder = options_folder(&s.input);
+        assert_ne!(folder, s.input);
+        assert!(folder.to_string_lossy().ends_with("-options"));
+        for want in [
+            "--options",
+            "--preview 30",
+            "--device cpu",
+            "--tile-size 256",
+        ] {
+            assert!(a.contains(want), "{want} in {a}");
+        }
+        assert!(parse_options("OPTIONS {\"offers\":[],\"together\":null}").is_some());
+        assert!(parse_options("PROGRESS 1 3").is_none());
     }
 
     #[test]

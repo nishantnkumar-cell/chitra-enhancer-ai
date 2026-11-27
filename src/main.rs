@@ -2,12 +2,12 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result, bail};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 use chitra_enhance::engine::{Engine, Lanczos, Rescaled};
 use chitra_enhance::ffmpeg::{self, Tools};
 use chitra_enhance::video::{self, Codec, Deinterlace, Denoise, Options, Stopped};
-use chitra_enhance::{analyze, disc};
+use chitra_enhance::{analyze, disc, options};
 
 /// Accepts an empty path (meaning "not given"), which clap's own parser refuses.
 fn any_path(s: &str) -> Result<PathBuf, std::convert::Infallible> {
@@ -110,6 +110,11 @@ struct Args {
     /// writes the short clip to -o plus a before/after picture next to it.
     #[arg(long, value_name = "SECONDS")]
     preview: Option<f64>,
+    /// Try three ways of restoring the video on a short sample (--preview sets
+    /// its length, default 5 seconds), say how long each would take, and print
+    /// the command for each. -o names the folder for the samples.
+    #[arg(long)]
+    options: bool,
     /// Print `PROGRESS done total` lines on stdout (used by the GUI).
     #[arg(long, hide = true)]
     progress: bool,
@@ -326,11 +331,14 @@ fn real_main() -> Result<()> {
     if a.analyze {
         return analyze_file(&a);
     }
+    if a.options {
+        return options_file(&a);
+    }
     need_output(&a)?;
     if a.input.is_dir() {
         return batch(a);
     }
-    run_one(a)
+    run_one(a).map(drop)
 }
 
 fn need_output(a: &Args) -> Result<()> {
@@ -425,6 +433,231 @@ fn show_analysis(
     Ok(())
 }
 
+/// The hardware and format the user asked for, as job settings.
+fn users_settings(a: &Args) -> chitra_enhance::job::Settings {
+    let name = |v: Option<clap::builder::PossibleValue>| v.map(|v| v.get_name().to_string());
+    let mut s = chitra_enhance::job::Settings {
+        vram_gb: a.vram_budget,
+        tile: a.tile_size,
+        ..Default::default()
+    };
+    if let Some(c) = name(a.codec.to_possible_value()) {
+        s.codec = c;
+    }
+    #[cfg(feature = "onnx")]
+    if let Some(d) = name(a.device.to_possible_value()) {
+        s.device = d;
+    }
+    s
+}
+
+/// How long each of the three samples is.
+fn sample_secs(a: &Args) -> f64 {
+    a.preview.unwrap_or(5.0).clamp(1.0, 30.0)
+}
+
+fn options_file(a: &Args) -> Result<()> {
+    if !a.input.is_file() || is_photo(&a.input) {
+        bail!("--options looks at one video or a DVD");
+    }
+    let tools = Tools::locate(a.ffmpeg.as_deref())?;
+    let input = std::path::absolute(&a.input)?;
+    let info = ffmpeg::probe(&tools, &input)?;
+    let samples: Vec<_> = analyze::positions(info.duration)
+        .into_iter()
+        .map(|p| (input.clone(), p))
+        .collect();
+    try_options(a, &tools, &info, &samples, &input)
+}
+
+/// Analyses the video, tries three ways of restoring a sample from the middle
+/// of `source`, and reports them. `info` describes the whole video.
+fn try_options(
+    a: &Args,
+    tools: &Tools,
+    info: &ffmpeg::VideoInfo,
+    samples: &[(PathBuf, f64)],
+    source: &std::path::Path,
+) -> Result<()> {
+    use chitra_enhance::job;
+    let (found_up, found_den) = installed_models();
+    // Models the user named take the place of the downloaded ones.
+    let upscaler = a.model.clone().or(found_up);
+    let denoiser = a.temporal_model.clone().or(found_den);
+    let ai = cfg!(feature = "onnx");
+    let have = analyze::Available {
+        upscaler: ai && upscaler.is_some(),
+        denoiser: ai && denoiser.is_some(),
+    };
+    let seen = analyze::run(tools, info, samples, have)?;
+    let folder = std::path::absolute(if a.output.as_os_str().is_empty() {
+        job::options_folder(&a.input)
+    } else {
+        a.output.clone()
+    })?;
+    if folder.is_file() {
+        bail!("{} is a file; --options needs a folder", folder.display());
+    }
+    std::fs::create_dir_all(&folder)?;
+    let secs = sample_secs(a);
+    let three = options::choices(&seen.suggestion, seen.noise, have);
+    // Once per process; a stop ends the whole comparison.
+    let _ = ctrlc::set_handler(|| video::STOP.store(true, Ordering::Relaxed));
+    let mut offers = Vec::new();
+    for (n, choice) in three.into_iter().enumerate() {
+        eprintln!("\n== {} of 3: {}. {}", n + 1, choice.title, choice.what);
+        if a.progress {
+            println!("PROGRESS {n} 3");
+        }
+        let clip = folder.join(format!("{}-{}.mp4", n + 1, choice.key));
+        if clip.exists() && !a.force {
+            bail!(
+                "{} exists; use --force to replace the earlier samples, or another folder",
+                clip.display()
+            );
+        }
+        let mut s = job::Settings {
+            input: source.to_path_buf(),
+            output: clip.clone(),
+            overwrite: true,
+            ..users_settings(a)
+        };
+        s.apply(&choice.settings, upscaler.clone(), denoiser.clone());
+        let mut args = s.args();
+        args.retain(|x| x != "--progress");
+        args.extend(["--preview".into(), format!("{secs}")]);
+        let mut one =
+            Args::try_parse_from(std::iter::once("chitra-enhance".to_string()).chain(args))?;
+        one.ffmpeg = a.ffmpeg.clone();
+        one.preset = a.preset.clone();
+        let picture = clip.with_extension("compare.png");
+        let (speed, error) = match run_one(one) {
+            Ok(Some(p)) => {
+                let fps = info.fps()
+                    * if s.double_rate && info.interlaced {
+                        2.0
+                    } else {
+                        1.0
+                    };
+                let whole = p.startup + p.per_frame * info.duration * fps;
+                (Some((whole, 1.0 / p.per_frame.max(1e-6))), None)
+            }
+            Ok(None) => (None, Some("no sample was made".to_string())),
+            Err(e) if e.downcast_ref::<Stopped>().is_some() => return Err(e),
+            Err(e) => {
+                eprintln!("  could not be tried: {e:#}");
+                (None, Some(format!("{e:#}")))
+            }
+        };
+        offers.push(options::Offer {
+            choice,
+            speed,
+            clip,
+            picture,
+            error,
+        });
+    }
+    if a.progress {
+        println!("PROGRESS 3 3");
+    }
+    if offers.iter().all(|o| o.speed.is_none()) {
+        bail!(
+            "none of the three could be tried: {}",
+            offers[0].error.as_deref().unwrap_or("unknown reason")
+        );
+    }
+    let together = side_by_side(tools, &offers, &folder.join("together.png"));
+
+    println!(
+        "\nThree ways to restore this video ({} places looked at, noise about {:.1} of 255):",
+        seen.samples, seen.noise
+    );
+    for (n, o) in offers.iter().enumerate() {
+        println!(
+            "\n{}. {}{}\n   {}",
+            n + 1,
+            o.choice.title,
+            if o.choice.recommended {
+                "  (suggested for this video)"
+            } else {
+                ""
+            },
+            o.choice.what
+        );
+        match (&o.speed, &o.error) {
+            (Some((whole, fps)), _) => println!(
+                "   The whole video: {} on this computer ({fps:.1} frames per second)\n   Sample: {}\n   Before/after: {}",
+                options::roughly(*whole),
+                o.clip.display(),
+                o.picture.display()
+            ),
+            (None, e) => println!(
+                "   Could not be tried: {}",
+                e.as_deref().unwrap_or("unknown reason")
+            ),
+        }
+        let mut s = job::Settings {
+            input: a.input.clone(),
+            output: job::default_output(&a.input),
+            title: a.title.clone(),
+            ..users_settings(a)
+        };
+        s.apply(&o.choice.settings, upscaler.clone(), denoiser.clone());
+        let mut args = s.args();
+        args.retain(|x| x != "--progress");
+        println!("   To use it: {}", job::command_line(&args));
+    }
+    if let Some(p) = &together {
+        println!(
+            "\nThe middle of one frame side by side: {}\n(top left the original, top right 1, bottom left 2, bottom right 3)",
+            p.display()
+        );
+    }
+    println!(
+        "\nLook at the samples and pick the one you like; every setting can still be changed."
+    );
+    if a.progress {
+        println!(
+            "OPTIONS {}",
+            serde_json::to_string(&options::Report { offers, together })?
+        );
+    }
+    Ok(())
+}
+
+/// One picture of the middle of the same frame: original and the three results.
+/// None if any sample is missing or ffmpeg cannot make it.
+fn side_by_side(
+    tools: &Tools,
+    offers: &[options::Offer],
+    out: &std::path::Path,
+) -> Option<PathBuf> {
+    if offers.len() != 3 || offers.iter().any(|o| o.speed.is_none()) {
+        return None;
+    }
+    // Each still is original | result: take the middle of one half.
+    let part = |left: &str| {
+        format!("crop=trunc(iw/8)*2:trunc(ih/4)*2:{left}:ih/4,pad=iw+4:ih+4:0:0:black")
+    };
+    let graph = format!(
+        "[0:v]split[p][q];[p]{o}[a];[q]{r}[b];[1:v]{r}[c];[2:v]{r}[d];\
+         [a][b][c][d]xstack=inputs=4:layout=0_0|w0_0|0_h0|w0_h0",
+        o = part("iw/8"),
+        r = part("iw*5/8"),
+    );
+    let mut cmd = std::process::Command::new(&tools.ffmpeg);
+    cmd.args(["-v", "error", "-y"]);
+    for o in offers {
+        cmd.arg("-i").arg(&o.picture);
+    }
+    let made = cmd
+        .args(["-filter_complex", &graph, "-frames:v", "1"])
+        .arg(out)
+        .status()
+        .is_ok_and(|s| s.success());
+    made.then(|| out.to_path_buf())
+}
+
 /// A DVD: list, analyse, preview or restore its titles. A title is first copied
 /// off the disc without re-encoding, then handled like any video.
 fn disc_mode(a: Args, src: PathBuf) -> Result<()> {
@@ -475,12 +708,12 @@ fn disc_mode(a: Args, src: PathBuf) -> Result<()> {
         }
     );
 
-    if a.analyze || a.measure_noise || a.preview.is_some() {
+    if a.analyze || a.options || a.measure_noise || a.preview.is_some() {
         if all {
             bail!("pick one title with --title for this");
         }
         let tmp = tempfile::tempdir()?;
-        if a.analyze {
+        if a.analyze || a.options {
             let mut samples = Vec::new();
             for (i, at) in analyze::positions(first.seconds).into_iter().enumerate() {
                 let f = tmp.path().join(format!("sample{i}.mkv"));
@@ -489,7 +722,14 @@ fn disc_mode(a: Args, src: PathBuf) -> Result<()> {
             }
             let mut info = ffmpeg::probe(&tools, &samples[0].0)?;
             info.duration = first.seconds;
-            return show_analysis(&a, &tools, &info, &samples);
+            if a.analyze {
+                return show_analysis(&a, &tools, &info, &samples);
+            }
+            let len = sample_secs(&a) + 2.0;
+            let middle = tmp.path().join("middle.mkv");
+            let start = ((first.seconds - len) / 2.0).max(0.0);
+            disc::import(&tools, &src, first.number, Some((start, len)), &middle)?;
+            return try_options(&a, &tools, &info, &samples, &middle);
         }
         let len = a.preview.map_or(20.0, |p| p.clamp(1.0, 30.0) + 2.0);
         let start = ((first.seconds - len) / 2.0).max(0.0);
@@ -503,7 +743,7 @@ fn disc_mode(a: Args, src: PathBuf) -> Result<()> {
             }
             one.output = tmp.path().join("unused.mp4");
         }
-        return run_one(one);
+        return run_one(one).map(drop);
     }
 
     need_output(&a)?;
@@ -579,8 +819,8 @@ fn disc_title(
 /// up where it stopped (and an interrupted video resumes inside its own work folder).
 fn batch(a: Args) -> Result<()> {
     use chitra_enhance::job;
-    if a.preview.is_some() || a.measure_noise {
-        bail!("--preview and --measure-noise work on one file at a time");
+    if a.preview.is_some() || a.measure_noise || a.options {
+        bail!("--preview, --options and --measure-noise work on one file at a time");
     }
     if a.output.is_file() {
         bail!(
@@ -614,7 +854,7 @@ fn batch(a: Args) -> Result<()> {
         one.input = f.clone();
         one.output = out;
         match run_one(one) {
-            Ok(()) => done += 1,
+            Ok(_) => done += 1,
             Err(e) if e.downcast_ref::<Stopped>().is_some() => return Err(e),
             Err(e) => {
                 eprintln!("  FAILED: {e:#}");
@@ -637,7 +877,8 @@ fn batch(a: Args) -> Result<()> {
     Ok(())
 }
 
-fn run_one(mut a: Args) -> Result<()> {
+/// Restores one file as asked. A preview returns what it made.
+fn run_one(mut a: Args) -> Result<Option<video::Preview>> {
     if !a.input.is_file() {
         bail!("{} is not a file", a.input.display());
     }
@@ -666,7 +907,7 @@ fn run_one(mut a: Args) -> Result<()> {
     }
     video::REPORT_PROGRESS.store(a.progress, Ordering::Relaxed);
     if is_photo(&a.input) {
-        return photo_mode(&a);
+        return photo_mode(&a).map(|()| None);
     }
     let tools = Tools::locate(a.ffmpeg.as_deref())?;
     let info = ffmpeg::probe(&tools, &a.input)?;
@@ -733,7 +974,7 @@ fn run_one(mut a: Args) -> Result<()> {
             (Some(m), Some(u)) => println!("NOISE {m:.1} {u:.0}"),
             _ => println!("NOISE none"),
         }
-        return Ok(());
+        return Ok(None);
     }
     #[cfg_attr(not(feature = "onnx"), allow(unused_variables))]
     let sigma = match (a.temporal_sigma, measured, suggested) {
@@ -772,7 +1013,7 @@ fn run_one(mut a: Args) -> Result<()> {
     }
     eprintln!("Engine: {}", engine.describe());
     if a.dry_run {
-        return Ok(());
+        return Ok(None);
     }
     // Once per process: a batch runs this for every file.
     let _ = ctrlc::set_handler(|| video::STOP.store(true, Ordering::Relaxed));
@@ -792,7 +1033,7 @@ fn run_one(mut a: Args) -> Result<()> {
             mins / 60,
             mins % 60
         );
-        return Ok(());
+        return Ok(Some(p));
     }
     if o.output.exists() && !a.force {
         bail!(
@@ -809,7 +1050,8 @@ fn run_one(mut a: Args) -> Result<()> {
         s.seconds,
         o.output.display()
     );
-    Ok(())
+    eprintln!("Time at work, stages overlapping: {}", s.busy);
+    Ok(None)
 }
 
 fn is_photo(p: &std::path::Path) -> bool {

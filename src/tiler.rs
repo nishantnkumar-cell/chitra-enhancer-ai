@@ -9,7 +9,10 @@
 //! weights are normalised, a model that changes nothing gives back exactly the
 //! input (to f32 rounding), so the tiling itself leaves no seams.
 
+use std::borrow::Cow;
+
 use anyhow::{Result, bail};
+use rayon::prelude::*;
 
 /// An image as interleaved `f32` samples (height, width, channels).
 #[derive(Clone, Debug, PartialEq)]
@@ -38,7 +41,7 @@ impl Plane {
 
 /// Index into `0..n` for a position that may be past the end, mirroring at the
 /// edge without repeating the edge sample (`... 2 1 0 1 2 ... n-2 n-1 n-2 ...`).
-fn reflect(i: usize, n: usize) -> usize {
+pub(crate) fn reflect(i: usize, n: usize) -> usize {
     if n == 1 {
         return 0;
     }
@@ -48,7 +51,7 @@ fn reflect(i: usize, n: usize) -> usize {
 }
 
 /// The smallest multiple of `m` that is at least `n`.
-fn round_up(n: usize, m: usize) -> usize {
+pub(crate) fn round_up(n: usize, m: usize) -> usize {
     n.div_ceil(m) * m
 }
 
@@ -60,14 +63,15 @@ pub fn pad_reflect(src: &Plane, multiple: usize) -> Plane {
         return src.clone();
     }
     let mut out = Plane::new(pw, ph, src.c);
-    for y in 0..ph {
-        let sy = reflect(y, src.h);
-        for x in 0..pw {
-            let sx = reflect(x, src.w);
-            let d = (y * pw + x) * src.c;
-            out.data[d..d + src.c].copy_from_slice(src.at(sx, sy));
-        }
-    }
+    out.data
+        .par_chunks_mut(pw * src.c)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let sy = reflect(y, src.h);
+            for (x, px) in row.chunks_exact_mut(src.c).enumerate() {
+                px.copy_from_slice(src.at(reflect(x, src.w), sy));
+            }
+        });
     out
 }
 
@@ -135,11 +139,39 @@ where
     if scale == 0 || out_c == 0 || tile < 16 || overlap * 2 >= tile {
         bail!("bad tiling: scale {scale}, tile {tile}, overlap {overlap}");
     }
-    let padded = pad_reflect(src, 16);
+    let padded = if src.w.is_multiple_of(16) && src.h.is_multiple_of(16) {
+        Cow::Borrowed(src)
+    } else {
+        Cow::Owned(pad_reflect(src, 16))
+    };
     let (pw, ph, c) = (padded.w, padded.h, padded.c);
     let (tw, th) = (tile.min(pw), tile.min(ph));
     let xs = starts(pw, tw, overlap);
     let ys = starts(ph, th, overlap);
+    let (fw, fh) = (src.w * scale, src.h * scale);
+    let checked = |out: Plane| -> Result<Plane> {
+        if (out.w, out.h, out.c) != (tw * scale, th * scale, out_c) {
+            bail!(
+                "the model returned {}x{}x{} for a {tw}x{th}x{c} tile at scale {scale} \
+                 (expected {out_c} channels)",
+                out.w,
+                out.h,
+                out.c
+            );
+        }
+        Ok(out)
+    };
+
+    // One tile covers the whole picture: nothing to cut out or blend.
+    if xs.len() == 1 && ys.len() == 1 {
+        let out = checked(model(&padded)?)?;
+        return Ok(if (out.w, out.h) == (fw, fh) {
+            out
+        } else {
+            crop(&out, fw, fh)
+        });
+    }
+
     let (ow, oh) = (pw * scale, ph * scale);
     let mut acc = vec![0.0f32; ow * oh * out_c];
     let mut wsum = vec![0.0f32; ow * oh];
@@ -152,47 +184,63 @@ where
                 let s = ((y0 + y) * pw + x0) * c;
                 t.data[y * tw * c..(y + 1) * tw * c].copy_from_slice(&padded.data[s..s + tw * c]);
             }
-            let out = model(&t)?;
-            if (out.w, out.h, out.c) != (tw * scale, th * scale, out_c) {
-                bail!(
-                    "the model returned {}x{}x{} for a {tw}x{th}x{c} tile at scale {scale} \
-                     (expected {out_c} channels)",
-                    out.w,
-                    out.h,
-                    out.c
-                );
-            }
+            let out = checked(model(&t)?)?;
             let (left, right) = (x0 > 0, x0 + tw < pw);
             let (top, bottom) = (y0 > 0, y0 + th < ph);
-            for y in 0..out.h {
-                let wy = weight(y, out.h, ramp, top, bottom);
-                for x in 0..out.w {
-                    let wgt = wy * weight(x, out.w, ramp, left, right);
-                    let (gx, gy) = (x0 * scale + x, y0 * scale + y);
-                    let g = gy * ow + gx;
-                    let px = &out.data[(y * out.w + x) * out_c..(y * out.w + x + 1) * out_c];
-                    for k in 0..out_c {
-                        acc[g * out_c + k] += px[k] * wgt;
+            let across: Vec<f32> = (0..out.w)
+                .map(|x| weight(x, out.w, ramp, left, right))
+                .collect();
+            acc.par_chunks_mut(ow * out_c)
+                .zip(wsum.par_chunks_mut(ow))
+                .skip(y0 * scale)
+                .take(out.h)
+                .enumerate()
+                .for_each(|(y, (acc, wsum))| {
+                    let wy = weight(y, out.h, ramp, top, bottom);
+                    let row = &out.data[y * out.w * out_c..(y + 1) * out.w * out_c];
+                    let from = x0 * scale;
+                    for (((px, a), sum), wx) in row
+                        .chunks_exact(out_c)
+                        .zip(acc[from * out_c..].chunks_exact_mut(out_c))
+                        .zip(&mut wsum[from..])
+                        .zip(&across)
+                    {
+                        let wgt = wy * wx;
+                        for (a, v) in a.iter_mut().zip(px) {
+                            *a += v * wgt;
+                        }
+                        *sum += wgt;
                     }
-                    wsum[g] += wgt;
-                }
-            }
+                });
         }
     }
 
     // Normalise and crop away the padding.
-    let (fw, fh) = (src.w * scale, src.h * scale);
     let mut result = Plane::new(fw, fh, out_c);
-    for y in 0..fh {
-        for x in 0..fw {
-            let g = y * ow + x;
-            let inv = 1.0 / wsum[g];
-            for k in 0..out_c {
-                result.data[(y * fw + x) * out_c + k] = acc[g * out_c + k] * inv;
+    result
+        .data
+        .par_chunks_mut(fw * out_c)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for (x, px) in row.chunks_exact_mut(out_c).enumerate() {
+                let g = y * ow + x;
+                let inv = 1.0 / wsum[g];
+                for (k, v) in px.iter_mut().enumerate() {
+                    *v = acc[g * out_c + k] * inv;
+                }
             }
-        }
-    }
+        });
     Ok(result)
+}
+
+/// The top left `w` x `h` of a picture at least that large.
+fn crop(src: &Plane, w: usize, h: usize) -> Plane {
+    let mut out = Plane::new(w, h, src.c);
+    out.data
+        .par_chunks_mut(w * src.c)
+        .zip(src.data.par_chunks(src.w * src.c))
+        .for_each(|(out, row)| out.copy_from_slice(&row[..out.len()]));
+    out
 }
 
 #[cfg(test)]

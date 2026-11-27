@@ -12,13 +12,14 @@ anyhow = "1.0.105"
 clap = { version = "4.6.9", features = ["derive"] }
 ctrlc = "3.5.3"
 eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"], optional = true }
-fast_image_resize = "6.2.0"
+fast_image_resize = { version = "6.2.0", features = ["rayon"] }
 half = { version = "2.7.1", optional = true }
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "bmp", "webp", "tiff"] }
 indicatif = "0.18.6"
 jxl-encoder = { version = "0.3.1", default-features = false, features = ["std", "parallel"] }
 ort = { version = "2.0.0-rc.15", default-features = false, features = ["load-dynamic", "ndarray", "half", "cuda", "directml", "coreml"], optional = true }
 png = "0.18.1"
+rayon = "1.12.0"
 rfd = { version = "0.18", default-features = false, features = ["xdg-portal"], optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

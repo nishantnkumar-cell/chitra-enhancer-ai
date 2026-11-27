@@ -9,7 +9,7 @@ use std::sync::mpsc::{Receiver, channel};
 
 use chitra_enhance::analyze::Report;
 use chitra_enhance::job::{self, Settings};
-use chitra_enhance::legal;
+use chitra_enhance::{legal, options};
 use eframe::egui::{self, Color32, RichText};
 
 const TEAL: Color32 = Color32::from_rgb(0x3f, 0xd0, 0xb5);
@@ -64,6 +64,15 @@ struct App {
     query_note: String,
     /// Every .onnx in the models folder.
     library: Vec<PathBuf>,
+    /// The running job is trying the three options.
+    is_options: bool,
+    /// The running job adds or fetches models.
+    is_models: bool,
+    /// The three options last tried, and their side-by-side picture.
+    offers: Option<Box<options::Report>>,
+    offers_tex: Option<egui::TextureHandle>,
+    /// The upscaler and denoiser the options were tried with.
+    offer_models: (Option<PathBuf>, Option<PathBuf>),
     /// A file or disc given on the command line, opened on the first frame.
     open_first: Option<PathBuf>,
     /// The About window is open.
@@ -94,7 +103,6 @@ fn pick_file(title: &str, exts: &[&str]) -> Option<PathBuf> {
     d.pick_file()
 }
 
-/// A model choice: pick from the library, or any other .onnx file.
 /// Copyright, terms, no warranty and where the source is.
 fn about_window(ctx: &egui::Context, open: &mut bool) {
     egui::Window::new("About")
@@ -119,6 +127,7 @@ fn about_window(ctx: &egui::Context, open: &mut bool) {
         });
 }
 
+/// A model choice: pick from the library, or any other .onnx file.
 fn model_row(ui: &mut egui::Ui, label: &str, value: &mut Option<PathBuf>, library: &[PathBuf]) {
     ui.horizontal(|ui| {
         ui.label(label);
@@ -177,6 +186,11 @@ impl App {
             titles: vec![],
             report: None,
             query_note: String::new(),
+            is_options: false,
+            is_models: false,
+            offers: None,
+            offers_tex: None,
+            offer_models: (None, None),
             open_first: std::env::args_os().nth(1).map(PathBuf::from),
             // CHITRA_GUI_ABOUT is for pictures of that window.
             about: std::env::var_os("CHITRA_GUI_ABOUT").is_some(),
@@ -198,9 +212,35 @@ impl App {
             args.push("--restart".into());
         }
         self.is_preview = preview;
+        self.is_options = false;
         self.preview_tex = None;
         self.preview_clip = preview.then(|| job::preview_output(&self.s.input));
         self.spawn(ctx, args);
+    }
+
+    /// Tries three ways of restoring a short sample, for the user to choose.
+    fn find_options(&mut self, ctx: &egui::Context) {
+        // The models the choices are made with, kept for "Use these settings"
+        // even if a choice without AI is taken in between.
+        let dir = job::models_dir();
+        let fp16 = chitra_enhance::models::likely_gpu();
+        let find = |p: &str| dir.as_deref().and_then(|d| job::find_model(d, p, fp16));
+        self.offer_models = (
+            self.s.model.clone().or_else(|| find("realesr")),
+            self.s
+                .five_frame_model
+                .clone()
+                .or_else(|| find("fastdvdnet")),
+        );
+        let mut s = self.s.clone();
+        s.model = self.offer_models.0.clone();
+        s.five_frame_model = self.offer_models.1.clone();
+        self.is_preview = false;
+        self.preview_tex = None;
+        self.offers = None;
+        self.offers_tex = None;
+        self.spawn(ctx, s.options_args());
+        self.is_options = true;
     }
 
     /// Runs the command-line program with `args`, showing its output in the log.
@@ -220,6 +260,11 @@ impl App {
         }
         self.log.clear();
         self.progress = (0, 0);
+        self.is_models = args.first().is_some_and(|a| a == "models");
+        if self.is_models {
+            self.is_preview = false;
+            self.is_options = false;
+        }
         match cmd.spawn() {
             Ok(mut child) => {
                 let (tx, rx) = channel();
@@ -306,6 +351,8 @@ impl App {
         self.phase = Phase::Idle;
         self.titles.clear();
         self.report = None;
+        self.offers = None;
+        self.offers_tex = None;
         self.query_rx = None;
         self.query_note.clear();
         self.measured = None;
@@ -397,7 +444,7 @@ impl App {
         }
         ctx.request_repaint();
         self.take_answer();
-        if self.query_rx.is_some() {
+        if self.query_rx.is_some() || self.run.is_some() {
             return;
         }
         self.frames += 1;
@@ -434,6 +481,10 @@ impl App {
             match m {
                 Msg::Progress(d, t) => self.progress = (d, t),
                 Msg::Line(l) => {
+                    if let Some(o) = job::parse_options(&l) {
+                        self.offers = Some(Box::new(o));
+                        continue;
+                    }
                     self.log.push(l);
                     if self.log.len() > 500 {
                         self.log.remove(0);
@@ -446,7 +497,10 @@ impl App {
             std::thread::sleep(std::time::Duration::from_millis(100));
             while let Ok(m) = r.rx.try_recv() {
                 if let Msg::Line(l) = m {
-                    self.log.push(l);
+                    match job::parse_options(&l) {
+                        Some(o) => self.offers = Some(Box::new(o)),
+                        None => self.log.push(l),
+                    }
                 }
             }
             self.phase = if status.success() {
@@ -463,12 +517,84 @@ impl App {
                 )
             };
             self.run = None;
-            self.find_models();
+            // Only after fetching or adding models: otherwise a deliberate
+            // "no model" choice would be filled in again.
+            if self.is_models {
+                self.find_models();
+            }
             if let Some(d) = job::models_dir() {
                 self.library = chitra_enhance::models::library(&d);
             }
         }
     }
+}
+
+fn load_picture(ctx: &egui::Context, name: &str, file: &Path) -> Option<egui::TextureHandle> {
+    let rgba = image::open(file).ok()?.to_rgba8();
+    let size = [rgba.width() as usize, rgba.height() as usize];
+    let color = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+    Some(ctx.load_texture(name, color, egui::TextureOptions::LINEAR))
+}
+
+/// The three options with their pictures; returns the one to use, if pressed.
+fn offer_list(
+    ui: &mut egui::Ui,
+    found: &options::Report,
+    together: Option<&egui::TextureHandle>,
+    enabled: bool,
+) -> Option<usize> {
+    let mut chosen = None;
+    ui.label(RichText::new("Three ways to restore this video").strong());
+    for (n, o) in found.offers.iter().enumerate() {
+        ui.group(|ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{}. {}", n + 1, o.choice.title)).strong());
+                if o.choice.recommended {
+                    ui.label(RichText::new("suggested for this video").color(TEAL));
+                }
+            });
+            ui.label(&o.choice.what);
+            match (&o.speed, &o.error) {
+                (Some((whole, fps)), _) => {
+                    ui.label(format!(
+                        "Whole video: {} ({fps:.1} frames per second)",
+                        options::roughly(*whole)
+                    ));
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(enabled, egui::Button::new("Use these settings"))
+                            .clicked()
+                        {
+                            chosen = Some(n);
+                        }
+                        if ui.button("Play sample").clicked() {
+                            open_file(&o.clip);
+                        }
+                        if ui.button("Before and after").clicked() {
+                            open_file(&o.picture);
+                        }
+                    });
+                }
+                (None, e) => {
+                    ui.colored_label(
+                        Color32::from_rgb(0xff, 0x7a, 0x70),
+                        format!(
+                            "Could not be tried: {}",
+                            e.as_deref().unwrap_or("unknown reason")
+                        ),
+                    );
+                }
+            }
+        });
+    }
+    if let Some(tex) = together {
+        ui.label("One frame: original (top left), 1 (top right), 2 and 3 (below)");
+        let width = ui.available_width();
+        let ratio = tex.size()[1] as f32 / tex.size()[0] as f32;
+        ui.image((tex.id(), egui::vec2(width, width * ratio)));
+    }
+    chosen
 }
 
 /// Opens a file with the system's default program.
@@ -503,7 +629,13 @@ impl eframe::App for App {
             self.choose(ctx, p);
             // (A disc is busy listing its titles; analysing would replace that.)
             if self.screenshot.is_some() && !job::is_photo(&p_input) && self.query_rx.is_none() {
-                self.ask(ctx, false);
+                // CHITRA_GUI_OPTIONS is for pictures of the three options.
+                if std::env::var_os("CHITRA_GUI_OPTIONS").is_some() {
+                    self.s.preview_secs = 1;
+                    self.find_options(ctx);
+                } else {
+                    self.ask(ctx, false);
+                }
             }
         }
         self.take_screenshot(ctx);
@@ -511,30 +643,17 @@ impl eframe::App for App {
         if self.run.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
-        if self.phase == Phase::Done && self.is_preview && self.preview_tex.is_none() {
-            if let Some(clip) = &self.preview_clip
-                && let Ok(img) = image::open(clip.with_extension("compare.png"))
-            {
-                let rgba = img.to_rgba8();
-                let size = [rgba.width() as usize, rgba.height() as usize];
-                let color = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
-                self.preview_tex =
-                    Some(ctx.load_texture("preview", color, egui::TextureOptions::LINEAR));
-            }
-            self.is_preview = false;
-        }
-        if let Some(rx) = &self.measure_rx
-            && let Ok(r) = rx.try_recv()
+        if self.offers_tex.is_none()
+            && let Some(p) = self.offers.as_ref().and_then(|o| o.together.as_ref())
         {
-            self.measure_rx = None;
-            self.measured = r;
-            self.measure_note = match r {
-                Some((m, u)) => format!("measured about {m:.0}, suggested {u:.0}"),
-                None => "could not measure this video".into(),
-            };
-            if let (Some((_, u)), Some(_)) = (r, self.s.sigma) {
-                self.s.sigma = Some(u); // already tweaking by hand: start from the suggestion
-            }
+            self.offers_tex = load_picture(ctx, "options", p);
+        }
+        if self.phase == Phase::Done
+            && self.is_preview
+            && self.preview_tex.is_none()
+            && let Some(clip) = &self.preview_clip
+        {
+            self.preview_tex = load_picture(ctx, "preview", &clip.with_extension("compare.png"));
         }
     }
 
@@ -880,6 +999,17 @@ impl eframe::App for App {
                         {
                             self.ask(ctx, false);
                         }
+                        if ui
+                            .button("Find the 3 best options")
+                            .on_hover_text(
+                                "Tries three ways of restoring a short sample on this computer, \
+                                 shows them and how long each would take, and lets you choose. \
+                                 The sample length is the Preview slider.",
+                            )
+                            .clicked()
+                        {
+                            self.find_options(ctx);
+                        }
                         ui.label(RichText::new(&self.query_note).weak());
                     });
                 }
@@ -890,6 +1020,9 @@ impl eframe::App for App {
             let frac = if t > 0 { d as f32 / t as f32 } else { 0.0 };
             let bar = egui::ProgressBar::new(frac).fill(TEAL);
             let status = match &self.phase {
+                        Phase::Running if self.is_options && t > 0 => {
+                            format!("trying option {} of {t}", (d + 1).min(t))
+                        }
                         Phase::Running if t > 0 => {
                             let secs = self.started.map_or(0.0, |s| s.elapsed().as_secs_f32());
                             let eta = if d > 0 {
@@ -988,16 +1121,38 @@ impl eframe::App for App {
                     open_file(c);
                 }
             }
-            if !self.log.is_empty() {
-                ui.label(RichText::new("Log").strong());
+            let mut chosen = None;
+            if let Some(found) = &self.offers {
+                egui::ScrollArea::vertical()
+                    .id_salt("offers")
+                    .show(ui, |ui| {
+                        chosen = offer_list(ui, found, self.offers_tex.as_ref(), !running);
+                    });
+            } else {
+                if !self.log.is_empty() {
+                    ui.label(RichText::new("Log").strong());
+                }
+                egui::ScrollArea::vertical()
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        for l in &self.log {
+                            ui.label(RichText::new(l).monospace().small());
+                        }
+                    });
             }
-            egui::ScrollArea::vertical()
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    for l in &self.log {
-                        ui.label(RichText::new(l).monospace().small());
-                    }
-                });
+            if let Some(n) = chosen
+                && let Some(o) = self.offers.as_ref().and_then(|f| f.offers.get(n))
+            {
+                self.s.apply(
+                    &o.choice.settings,
+                    self.offer_models.0.clone(),
+                    self.offer_models.1.clone(),
+                );
+                self.query_note = format!(
+                    "\"{}\" filled in: change anything you like, then press Start",
+                    o.choice.title
+                );
+            }
         });
         about_window(ctx, &mut self.about);
     }

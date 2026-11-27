@@ -12,6 +12,7 @@ pub mod models;
 pub mod noise;
 #[cfg(feature = "onnx")]
 pub mod onnx;
+pub mod options;
 pub mod photo;
 pub mod temporal;
 pub mod tiler;

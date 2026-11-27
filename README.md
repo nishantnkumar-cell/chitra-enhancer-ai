@@ -92,6 +92,17 @@ your own recordings, are accepted: the program checks the disc and refuses a
 protected one, and ships no decryption. Needs ffmpeg 7 or newer built with the
 `dvdvideo` reader (libdvdread, libdvdnav).
 
+## Three options to choose from
+
+`chitra-enhance -i tape.mp4 --options` analyses the video, restores a short sample
+from the middle in three different ways on your computer, and prints for each what
+it does, how long the whole video would take, and the command to run it. The
+samples, a before/after still for each and one picture of all three side by side
+go into `tape-options/`. One is marked as suggested from the measurements; which
+looks best is for you to judge. `--preview N` sets the sample length (1 to 30 s,
+default 5). The window has **Find the 3 best options**, with **Use these
+settings** on each.
+
 ## Trying settings first
 
 `--preview 5` processes only 5 seconds from the middle of the video with your real
@@ -154,8 +165,9 @@ Transparency is not kept.
   `ORT_DYLIB_PATH` at the ONNX Runtime library (`libonnxruntime.so`,
   `onnxruntime.dll`, `libonnxruntime.dylib`). `--device auto|cuda|directml|coreml|cpu`.
 * Models are FP16 or FP32 ONNX, input RGB 0..1 (NCHW). Tile size follows
-  `--vram-budget` (GB) and steps down 512 -> 256 -> 128 if the GPU runs out of
-  memory. Run tests with a model: `CHITRA_TEST_MODEL=x.onnx cargo test --features onnx`.
+  `--vram-budget` (GB), from 1024 pixels, and steps down 1024 -> 768 -> 512 ->
+  256 -> 128 if the GPU runs out of memory. A tile that holds the whole frame is
+  much the fastest. Run tests with a model: `CHITRA_TEST_MODEL=x.onnx cargo test --features onnx`.
 
 ## Getting the models
 
@@ -197,7 +209,8 @@ Video pipeline, resume, tiler, ONNX engine, grain, 1-4x scaling and photo mode
 (JPEG quality tiers, 16-bit JXL/PNG) work, tested with a real Real-ESRGAN model.
 Five-frame video denoising (FastDVDnet) and CI on Linux, Windows and macOS are in.
 The window has been checked from screenshots, not yet by someone using it.
-Graphics card acceleration has not been tested on real hardware.
+Graphics card acceleration is tested with DirectML on an NVIDIA RTX 4070 Ti (see
+the user guide for speeds); CUDA and Core ML have not been tried on real hardware.
 
 ## Security
 

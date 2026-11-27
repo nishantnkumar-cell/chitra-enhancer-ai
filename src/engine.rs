@@ -3,7 +3,7 @@
 //! (no AI); the ONNX engine (feature `onnx`) runs a model on the GPU.
 
 use anyhow::{Context, Result};
-use fast_image_resize::images::Image;
+use fast_image_resize::images::{Image, ImageRef};
 use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
 
 use crate::infer::{plane_from_rgb8, rgb8_from_plane};
@@ -37,7 +37,7 @@ pub fn resize_plane(resizer: &mut Resizer, src: &Plane, nw: usize, nh: usize) ->
     })
 }
 
-pub trait Engine {
+pub trait Engine: Send {
     /// How many times larger the frames come out.
     fn scale(&self) -> usize;
     /// One frame of `w` x `h` RGB bytes in, `w*scale` x `h*scale` out.
@@ -65,7 +65,7 @@ pub fn resize_rgb(
     nw: usize,
     nh: usize,
 ) -> Result<Vec<u8>> {
-    let src = Image::from_vec_u8(w as u32, h as u32, rgb.to_vec(), PixelType::U8x3)
+    let src = ImageRef::new(w as u32, h as u32, rgb, PixelType::U8x3)
         .context("a frame of the wrong size")?;
     let mut dst = Image::new(nw as u32, nh as u32, PixelType::U8x3);
     resizer
