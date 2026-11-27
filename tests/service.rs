@@ -252,4 +252,5 @@ fn a_short_clip_is_restored_collected_and_removed() {
         .to_string();
     assert!(refused.contains("limit is 4 s"), "{refused}");
     assert!(!refused.contains(s.data.path().to_str().unwrap()));
+    assert!(s.nothing_left(), "a failed job is removed too");
 }

@@ -112,6 +112,9 @@ impl Config {
         }
         #[cfg(feature = "onnx")]
         self.onnx_device()?;
+        if self.model.is_some() && !cfg!(feature = "onnx") {
+            bail!("a model is set up, but this build has no AI model support (feature \"onnx\")");
+        }
         if self.model.is_some() && self.find_model(None).is_none() {
             bail!("the default model is not in the models folder");
         }

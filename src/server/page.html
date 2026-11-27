@@ -90,7 +90,10 @@ async function one(file, query) {
   for (;;) {
     await new Promise(done => setTimeout(done, 2000));
     const s = await (await call("/v1/jobs/" + job)).json();
-    if (s.state === "failed") throw new Error(s.message);
+    if (s.state === "failed") {
+      await call("/v1/jobs/" + job, { method: "DELETE" }).catch(() => {});
+      throw new Error(s.message);
+    }
     if (s.state === "done") break;
     if (s.state === "running" && s.total) {
       $("bar").value = s.done; $("bar").max = s.total;

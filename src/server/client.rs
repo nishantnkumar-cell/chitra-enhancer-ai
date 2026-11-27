@@ -187,22 +187,29 @@ impl Client {
     ) -> Result<()> {
         let accepted: Accepted = json(self.send("/v1/clip", wanted, file)?)?;
         let job = format!("/v1/jobs/{}", accepted.job);
+        // Nothing needs keeping once it is collected or has failed. (It would
+        // expire anyway, so a failure to remove it loses nothing.)
+        let forget = || {
+            let _ = self
+                .agent
+                .delete(self.url(&job, None))
+                .header("Authorization", &self.authorization)
+                .call();
+        };
         loop {
             match json(self.get(&job)?)? {
                 State::Done => break,
-                State::Failed { message } => bail!("the service could not restore it: {message}"),
+                State::Failed { message } => {
+                    forget();
+                    bail!("the service could not restore it: {message}");
+                }
                 State::Running { done, total } if total > 0 => progress(done, total),
                 State::Running { .. } | State::Queued => {}
             }
             std::thread::sleep(Duration::from_millis(1000));
         }
         save(self.get(&format!("{job}/result"))?, out)?;
-        // It would expire anyway, so a failure here loses nothing.
-        let _ = self
-            .agent
-            .delete(self.url(&job, None))
-            .header("Authorization", &self.authorization)
-            .call();
+        forget();
         Ok(())
     }
 }
